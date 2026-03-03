@@ -34,9 +34,23 @@ export function json(data: unknown) {
   };
 }
 
-/** Convert any thrown value into the standard JSON error envelope. */
+/** Convert any thrown value into the standard JSON error envelope.
+ * Extracts _effectiveAccountId and _callingAccountId from errors thrown by withFeishuToolClient.
+ */
 export function errorResult(err: unknown) {
-  return json({ error: err instanceof Error ? err.message : String(err) });
+  const msg = err instanceof Error ? err.message : String(err);
+  const enriched = err as Record<string, unknown> | null;
+  const effectiveAccountId = (enriched && typeof enriched === "object")
+    ? (enriched._effectiveAccountId as string | undefined)
+    : undefined;
+  const callingAccountId = (enriched && typeof enriched === "object")
+    ? (enriched._callingAccountId as string | undefined)
+    : undefined;
+  return json({
+    error: msg,
+    ...(effectiveAccountId ? { _effectiveAccountId: effectiveAccountId } : {}),
+    ...(callingAccountId && callingAccountId !== effectiveAccountId ? { _callingAccountId: callingAccountId } : {}),
+  });
 }
 
 /** Small async sleep utility used by retry backoff. */

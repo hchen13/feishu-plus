@@ -152,6 +152,11 @@ export const FeishuAccountConfigSchema = z
     renderMode: RenderModeSchema,
     streaming: StreamingModeSchema,
     tools: FeishuToolsConfigSchema,
+    // Accounts allowed to operate as this account via asAccountId delegation.
+    // Use "*" to allow any account. Omit or leave empty to disallow delegation.
+    // Example: allowedSupervisors: ["main"] grants the "main" account the right to
+    // call tools on behalf of this account using asAccountId.
+    allowedSupervisors: z.array(z.string()).optional(),
   })
   .strict();
 

@@ -24,6 +24,7 @@ import {
   extractMentionTargets,
   extractMessageBody,
   isMentionForwardRequest,
+  renderMentionsForContext,
 } from "./mention.js";
 import { maybeCreateDynamicAgent } from "./dynamic-agent.js";
 import { runWithFeishuToolContext } from "./tools-common/tool-context.js";
@@ -539,6 +540,9 @@ export function parseFeishuMessageEvent(
     contentType: event.message.message_type,
   };
 
+  // Preserve @mentions to non-bot users for context/history (bot mention is stripped, others become @name)
+  ctx.contentWithMentions = renderMentionsForContext(rawContent, event.message.mentions, botOpenId);
+
   // Detect mention forward request: message mentions bot + at least one other user
   if (isMentionForwardRequest(event, botOpenId)) {
     const mentionTargets = extractMentionTargets(event, botOpenId);
@@ -661,7 +665,7 @@ export async function handleFeishuMessage(params: {
     });
 
     const senderDisplay = `${ctx.senderName ?? ctx.senderOpenId}`;
-    const contentForHistory = `${senderDisplay}: ${ctx.content}`;
+    const contentForHistory = `${senderDisplay}: ${ctx.contentWithMentions ?? ctx.content}`;
 
     if (chatHistories) {
       recordPendingHistoryEntryIfEnabled({
@@ -683,7 +687,7 @@ export async function handleFeishuMessage(params: {
         chatId: ctx.chatId,
         messageId: ctx.messageId,
         sender: senderDisplay,
-        body: ctx.content,
+        body: ctx.contentWithMentions ?? ctx.content,
       });
     }
 

@@ -119,3 +119,33 @@ export function buildMentionedCardContent(targets: MentionTarget[], message: str
   const mentionParts = targets.map((t) => formatMentionForCard(t));
   return `${mentionParts.join(" ")} ${message}`;
 }
+
+/**
+ * Render @mention placeholders in text for context/history storage:
+ * - Bot's own mention → stripped (it's just a routing trigger)
+ * - Other users' mentions → @displayName (preserves "talking to X" context)
+ */
+export function renderMentionsForContext(
+  text: string,
+  mentions: FeishuMessageEvent["message"]["mentions"],
+  botOpenId?: string,
+): string {
+  if (!mentions || mentions.length === 0) return text;
+  let result = text;
+  for (const mention of mentions) {
+    const isBotMention = botOpenId && mention.id.open_id === botOpenId;
+    const escapedKey = mention.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (isBotMention) {
+      // Strip bot mention key (+ trailing space) and @name form
+      result = result.replace(new RegExp(escapedKey + "\\s*", "g"), "");
+      result = result.replace(
+        new RegExp(`@${mention.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`, "g"),
+        "",
+      );
+    } else {
+      // Replace placeholder key with readable @name
+      result = result.replace(new RegExp(escapedKey, "g"), `@${mention.name}`);
+    }
+  }
+  return result.replace(/\s+/g, " ").trim();
+}

@@ -26,11 +26,19 @@ const Permission = Type.Union([
   Type.Literal("full_access"),
 ]);
 
+const AsAccountId = Type.Optional(
+  Type.String({
+    description:
+      "Operate as a specific Feishu account (requires allowedSupervisors config on target account).",
+  }),
+);
+
 export const FeishuPermSchema = Type.Union([
   Type.Object({
     action: Type.Literal("list"),
     token: Type.String({ description: "File token" }),
     type: TokenType,
+    asAccountId: AsAccountId,
   }),
   Type.Object({
     action: Type.Literal("add"),
@@ -39,6 +47,7 @@ export const FeishuPermSchema = Type.Union([
     member_type: MemberType,
     member_id: Type.String({ description: "Member ID (email, open_id, user_id, etc.)" }),
     perm: Permission,
+    asAccountId: AsAccountId,
   }),
   Type.Object({
     action: Type.Literal("remove"),
@@ -46,6 +55,7 @@ export const FeishuPermSchema = Type.Union([
     type: TokenType,
     member_type: MemberType,
     member_id: Type.String({ description: "Member ID to remove" }),
+    asAccountId: AsAccountId,
   }),
 ]);
 

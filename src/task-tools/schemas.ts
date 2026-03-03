@@ -1,4 +1,11 @@
 import { Type } from "@sinclair/typebox";
+const AsAccountId = Type.Optional(
+  Type.String({
+    description:
+      "Operate as a specific Feishu account (requires allowedSupervisors config on target account).",
+  }),
+);
+
 import type { TaskClient } from "./common.js";
 
 type TaskCreatePayload = NonNullable<Parameters<TaskClient["task"]["v2"]["task"]["create"]>[0]>;
@@ -86,10 +93,14 @@ export const CreateTaskSchema = Type.Object({
       description: "User ID type for member IDs, e.g. open_id/user_id/union_id",
     }),
   ),
+
+  asAccountId: AsAccountId,
 });
 
 export const DeleteTaskSchema = Type.Object({
   task_guid: Type.String({ description: "Task GUID to delete" }),
+
+  asAccountId: AsAccountId,
 });
 
 export const GetTaskSchema = Type.Object({
@@ -99,6 +110,8 @@ export const GetTaskSchema = Type.Object({
       description: "User ID type in returned members, e.g. open_id/user_id/union_id",
     }),
   ),
+
+  asAccountId: AsAccountId,
 });
 
 const TaskUpdateContentSchema = Type.Object(
@@ -135,4 +148,6 @@ export const UpdateTaskSchema = Type.Object({
       description: "User ID type when task body contains user-related fields",
     }),
   ),
+
+  asAccountId: AsAccountId,
 });

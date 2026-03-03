@@ -40,6 +40,8 @@ export type FeishuMessageContext = {
   mentionTargets?: MentionTarget[];
   /** Extracted message body (after removing @ placeholders) */
   mentionMessageBody?: string;
+  /** Content with bot mention stripped but other @mentions preserved as @displayName */
+  contentWithMentions?: string;
 };
 
 export type FeishuSendResult = {

@@ -4,7 +4,7 @@ import type * as Lark from "@larksuiteoapi/node-sdk";
 import { Readable } from "stream";
 import { FeishuDocSchema, type FeishuDocParams } from "./doc-schema.js";
 import { getFeishuRuntime } from "./runtime.js";
-import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient } from "./tools-common/tool-exec.js";
+import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient, makeFeishuToolFactory } from "./tools-common/tool-exec.js";
 
 // ============ Helpers ============
 
@@ -777,7 +777,7 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
   // Main document tool with action-based dispatch
   if (docEnabled) {
     api.registerTool(
-    {
+    makeFeishuToolFactory((agentAccountId) => ({
       name: "feishu_doc",
       label: "Feishu Doc",
       description:
@@ -785,11 +785,14 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
       parameters: FeishuDocSchema,
       async execute(_toolCallId, params) {
         const p = params as FeishuDocParams;
+        const asAccountId = (params as any).asAccountId as string | undefined;
         try {
           return await withFeishuToolClient({
             api,
             toolName: "feishu_doc",
             requiredTool: "doc",
+            agentAccountId,
+            asAccountId,
             run: async ({ client, account }) => {
               const mediaMaxBytes = (account.config?.mediaMaxMb ?? 30) * 1024 * 1024;
               switch (p.action) {
@@ -815,10 +818,13 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
             },
           });
         } catch (err) {
-          return json({ error: err instanceof Error ? err.message : String(err) });
+          const msg = err instanceof Error ? err.message : String(err);
+          const e = err as Record<string, unknown>;
+          const effAcct = (e && typeof e === "object") ? (e._effectiveAccountId as string | undefined) : undefined;
+          return json({ error: msg, ...(effAcct ? { _effectiveAccountId: effAcct } : {}) });
         }
       },
-    },
+    })),
     { name: "feishu_doc" },
   );
     registered.push("feishu_doc");
@@ -827,26 +833,32 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
   // Keep feishu_app_scopes as independent tool
   if (scopesEnabled) {
     api.registerTool(
-    {
+    makeFeishuToolFactory((agentAccountId) => ({
       name: "feishu_app_scopes",
       label: "Feishu App Scopes",
       description:
         "List current app permissions (scopes). Use to debug permission issues or check available capabilities.",
       parameters: Type.Object({}),
-      async execute() {
+      async execute(_toolCallId, params) {
+        const asAccountId = (params as any).asAccountId as string | undefined;
         try {
           const result = await withFeishuToolClient({
             api,
             toolName: "feishu_app_scopes",
             requiredTool: "scopes",
+            agentAccountId,
+            asAccountId,
             run: async ({ client }) => listAppScopes(client),
           });
           return json(result);
         } catch (err) {
-          return json({ error: err instanceof Error ? err.message : String(err) });
+          const msg = err instanceof Error ? err.message : String(err);
+          const e = err as Record<string, unknown>;
+          const effAcct = (e && typeof e === "object") ? (e._effectiveAccountId as string | undefined) : undefined;
+          return json({ error: msg, ...(effAcct ? { _effectiveAccountId: effAcct } : {}) });
         }
       },
-    },
+    })),
     { name: "feishu_app_scopes" },
   );
     registered.push("feishu_app_scopes");

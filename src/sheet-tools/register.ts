@@ -1,5 +1,5 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient } from "../tools-common/tool-exec.js";
+import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient, makeFeishuToolFactory } from "../tools-common/tool-exec.js";
 import {
   appendRows,
   getSheetMeta,
@@ -30,7 +30,7 @@ export function registerFeishuSheetTools(api: OpenClawPluginApi) {
   }
 
   api.registerTool(
-    {
+    makeFeishuToolFactory((agentAccountId, agentId) => ({
       name: "feishu_sheet",
       label: "Feishu Sheet",
       description:
@@ -38,12 +38,16 @@ export function registerFeishuSheetTools(api: OpenClawPluginApi) {
       parameters: FeishuSheetSchema,
       async execute(_toolCallId, params) {
         const p = params as FeishuSheetParams;
+        const asAccountId = (params as any).asAccountId as string | undefined;
 
         try {
           return await withFeishuToolClient({
             api,
             toolName: "feishu_sheet",
             requiredTool: "sheet",
+            agentAccountId,
+            agentId,
+            asAccountId,
             run: async ({ client }) => {
               const sheetClient = client as SheetClient;
 
@@ -73,7 +77,7 @@ export function registerFeishuSheetTools(api: OpenClawPluginApi) {
           return errorResult(err);
         }
       },
-    },
+    })),
     { name: "feishu_sheet" },
   );
 

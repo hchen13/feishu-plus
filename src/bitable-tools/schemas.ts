@@ -1,4 +1,12 @@
 import { Type } from "@sinclair/typebox";
+
+const AsAccountId = Type.Optional(
+  Type.String({
+    description:
+      "Operate as a specific Feishu account (requires allowedSupervisors config on target account).",
+  }),
+);
+
 import type {
   BitableFieldCreateData,
   BitableFieldDescription,
@@ -84,6 +92,8 @@ export const GetMetaSchema = Type.Object({
     description:
       "Bitable URL. Supports both formats: /base/XXX?table=YYY or /wiki/XXX?table=YYY",
   }),
+
+  asAccountId: AsAccountId,
 });
 
 export const ListFieldsSchema = Type.Object({
@@ -91,6 +101,8 @@ export const ListFieldsSchema = Type.Object({
     description: "Bitable app token (use feishu_bitable_get_meta to get from URL)",
   }),
   table_id: Type.String({ description: "Table ID (from URL: ?table=YYY)" }),
+
+  asAccountId: AsAccountId,
 });
 
 export const CreateFieldSchema = Type.Object({
@@ -120,6 +132,8 @@ export const CreateFieldSchema = Type.Object({
   ui_type: Type.Optional(
     Type.String({ description: "Optional UI type override (e.g., Text, Number, SingleSelect)" }),
   ),
+
+  asAccountId: AsAccountId,
 });
 
 export const UpdateFieldSchema = Type.Object({
@@ -145,6 +159,8 @@ export const UpdateFieldSchema = Type.Object({
     ),
   ),
   ui_type: Type.Optional(Type.String({ description: "Optional UI type override" })),
+
+  asAccountId: AsAccountId,
 });
 
 export const DeleteFieldSchema = Type.Object({
@@ -153,6 +169,8 @@ export const DeleteFieldSchema = Type.Object({
   }),
   table_id: Type.String({ description: "Table ID (from URL: ?table=YYY)" }),
   field_id: Type.String({ description: "Field ID to delete" }),
+
+  asAccountId: AsAccountId,
 });
 
 export const ListRecordsSchema = Type.Object({
@@ -168,6 +186,8 @@ export const ListRecordsSchema = Type.Object({
     }),
   ),
   page_token: Type.Optional(Type.String({ description: "Pagination token from previous response" })),
+
+  asAccountId: AsAccountId,
 });
 
 export const GetRecordSchema = Type.Object({
@@ -176,6 +196,8 @@ export const GetRecordSchema = Type.Object({
   }),
   table_id: Type.String({ description: "Table ID (from URL: ?table=YYY)" }),
   record_id: Type.String({ description: "Record ID to retrieve" }),
+
+  asAccountId: AsAccountId,
 });
 
 export const CreateRecordSchema = Type.Object({
@@ -187,6 +209,8 @@ export const CreateRecordSchema = Type.Object({
     description:
       "Field values keyed by field name. Format by type: Text='string', Number=123, SingleSelect='Option', MultiSelect=['A','B'], DateTime=timestamp_ms, User=[{id:'ou_xxx'}], URL={text:'Display',link:'https://...'}",
   }),
+
+  asAccountId: AsAccountId,
 });
 
 export const UpdateRecordSchema = Type.Object({
@@ -198,6 +222,8 @@ export const UpdateRecordSchema = Type.Object({
   fields: Type.Record(Type.String(), Type.Any(), {
     description: "Field values to update (same format as create_record)",
   }),
+
+  asAccountId: AsAccountId,
 });
 
 export const DeleteRecordSchema = Type.Object({
@@ -206,6 +232,8 @@ export const DeleteRecordSchema = Type.Object({
   }),
   table_id: Type.String({ description: "Table ID (from URL: ?table=YYY)" }),
   record_id: Type.String({ description: "Record ID to delete" }),
+
+  asAccountId: AsAccountId,
 });
 
 export const BatchDeleteRecordsSchema = Type.Object({
@@ -218,4 +246,6 @@ export const BatchDeleteRecordsSchema = Type.Object({
     minItems: 1,
     maxItems: 500,
   }),
+
+  asAccountId: AsAccountId,
 });

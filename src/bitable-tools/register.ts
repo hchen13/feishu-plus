@@ -1,6 +1,6 @@
 import type { TSchema } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient } from "../tools-common/tool-exec.js";
+import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient, makeFeishuToolFactory } from "../tools-common/tool-exec.js";
 import {
   batchDeleteRecords,
   createField,
@@ -55,23 +55,27 @@ function registerBitableTool<P>(
   spec: ToolSpec<P>,
 ) {
   api.registerTool(
-    {
+    makeFeishuToolFactory((agentAccountId, agentId) => ({
       name: spec.name,
       label: spec.label,
       description: spec.description,
       parameters: spec.parameters,
       async execute(_toolCallId, params) {
+        const asAccountId = (params as any).asAccountId as string | undefined;
         try {
           return await withFeishuToolClient({
             api,
             toolName: spec.name,
+            agentAccountId,
+            agentId,
+            asAccountId,
             run: async ({ client }) => json(await spec.run(client as BitableClient, params as P)),
           });
         } catch (err) {
           return errorResult(err);
         }
       },
-    },
+    })),
     { name: spec.name },
   );
 }

@@ -1,4 +1,11 @@
 import { Type } from "@sinclair/typebox";
+const AsAccountId = Type.Optional(
+  Type.String({
+    description:
+      "Operate as a specific Feishu account (requires allowedSupervisors config on target account).",
+  }),
+);
+
 
 export type FeishuSheetParams = {
   action:
@@ -165,4 +172,6 @@ export const FeishuSheetSchema = Type.Object({
         "Optional filename for insert_cell_image. Defaults to the basename of image_path.",
     }),
   ),
+
+  asAccountId: AsAccountId,
 });

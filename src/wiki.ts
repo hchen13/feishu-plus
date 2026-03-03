@@ -1,7 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type * as Lark from "@larksuiteoapi/node-sdk";
 import { FeishuWikiSchema, type FeishuWikiParams } from "./wiki-schema.js";
-import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient } from "./tools-common/tool-exec.js";
+import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient, makeFeishuToolFactory } from "./tools-common/tool-exec.js";
 
 // ============ Helpers ============
 
@@ -164,7 +164,7 @@ export function registerFeishuWikiTools(api: OpenClawPluginApi) {
   }
 
   api.registerTool(
-    {
+    makeFeishuToolFactory((agentAccountId, agentId) => ({
       name: "feishu_wiki",
       label: "Feishu Wiki",
       description:
@@ -172,11 +172,15 @@ export function registerFeishuWikiTools(api: OpenClawPluginApi) {
       parameters: FeishuWikiSchema,
       async execute(_toolCallId, params) {
         const p = params as FeishuWikiParams;
+        const asAccountId = (params as any).asAccountId as string | undefined;
         try {
           return await withFeishuToolClient({
             api,
             toolName: "feishu_wiki",
             requiredTool: "wiki",
+            agentAccountId,
+            agentId,
+            asAccountId,
             run: async ({ client }) => {
               switch (p.action) {
                 case "spaces":
@@ -212,10 +216,13 @@ export function registerFeishuWikiTools(api: OpenClawPluginApi) {
             },
           });
         } catch (err) {
-          return json({ error: err instanceof Error ? err.message : String(err) });
+          const msg = err instanceof Error ? err.message : String(err);
+          const e = err as Record<string, unknown>;
+          const effAcct = (e && typeof e === "object") ? (e._effectiveAccountId as string | undefined) : undefined;
+          return json({ error: msg, ...(effAcct ? { _effectiveAccountId: effAcct } : {}) });
         }
       },
-    },
+    })),
     { name: "feishu_wiki" },
   );
 

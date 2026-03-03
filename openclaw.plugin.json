@@ -1,0 +1,17 @@
+{
+  "id": "feishu",
+  "channels": ["feishu"],
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "milestoneContext": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true }
+        }
+      }
+    }
+  }
+}

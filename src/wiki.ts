@@ -1,16 +1,13 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type * as Lark from "@larksuiteoapi/node-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/feishu";
+import { listEnabledFeishuAccounts } from "./accounts.js";
+import { createFeishuToolClient, resolveAnyEnabledFeishuToolsConfig } from "./tool-account.js";
+import {
+  jsonToolResult,
+  toolExecutionErrorResult,
+  unknownToolActionResult,
+} from "./tool-result.js";
 import { FeishuWikiSchema, type FeishuWikiParams } from "./wiki-schema.js";
-import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient, makeFeishuToolFactory } from "./tools-common/tool-exec.js";
-
-// ============ Helpers ============
-
-function json(data: unknown) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-    details: data,
-  };
-}
 
 type ObjType = "doc" | "sheet" | "mindnote" | "bitable" | "file" | "docx" | "slides";
 
@@ -22,7 +19,9 @@ const WIKI_ACCESS_HINT =
 
 async function listSpaces(client: Lark.Client) {
   const res = await client.wiki.space.list({});
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   const spaces =
     res.data?.items?.map((s) => ({
@@ -43,7 +42,9 @@ async function listNodes(client: Lark.Client, spaceId: string, parentNodeToken?:
     path: { space_id: spaceId },
     params: { parent_node_token: parentNodeToken },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     nodes:
@@ -61,7 +62,9 @@ async function getNode(client: Lark.Client, token: string) {
   const res = await client.wiki.space.getNode({
     params: { token },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   const node = res.data?.node;
   return {
@@ -93,7 +96,9 @@ async function createNode(
       parent_node_token: parentNodeToken,
     },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   const node = res.data?.node;
   return {
@@ -118,7 +123,9 @@ async function moveNode(
       target_parent_token: targetParentToken,
     },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     success: true,
@@ -126,17 +133,14 @@ async function moveNode(
   };
 }
 
-async function renameNode(
-  client: Lark.Client,
-  spaceId: string,
-  nodeToken: string,
-  title: string,
-) {
+async function renameNode(client: Lark.Client, spaceId: string, nodeToken: string, title: string) {
   const res = await client.wiki.spaceNode.updateTitle({
     path: { space_id: spaceId, node_token: nodeToken },
     data: { title },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     success: true,
@@ -153,78 +157,77 @@ export function registerFeishuWikiTools(api: OpenClawPluginApi) {
     return;
   }
 
-  if (!hasFeishuToolEnabledForAnyAccount(api.config)) {
+  const accounts = listEnabledFeishuAccounts(api.config);
+  if (accounts.length === 0) {
     api.logger.debug?.("feishu_wiki: No Feishu accounts configured, skipping wiki tools");
     return;
   }
 
-  if (!hasFeishuToolEnabledForAnyAccount(api.config, "wiki")) {
+  const toolsCfg = resolveAnyEnabledFeishuToolsConfig(accounts);
+  if (!toolsCfg.wiki) {
     api.logger.debug?.("feishu_wiki: wiki tool disabled in config");
     return;
   }
 
+  type FeishuWikiExecuteParams = FeishuWikiParams & { accountId?: string };
+
   api.registerTool(
-    makeFeishuToolFactory((agentAccountId, agentId) => ({
-      name: "feishu_wiki",
-      label: "Feishu Wiki",
-      description:
-        "Feishu knowledge base operations. Actions: spaces, nodes, get, create, move, rename",
-      parameters: FeishuWikiSchema,
-      async execute(_toolCallId, params) {
-        const p = params as FeishuWikiParams;
-        const asAccountId = (params as any).asAccountId as string | undefined;
-        try {
-          return await withFeishuToolClient({
-            api,
-            toolName: "feishu_wiki",
-            requiredTool: "wiki",
-            agentAccountId,
-            agentId,
-            asAccountId,
-            run: async ({ client }) => {
-              switch (p.action) {
-                case "spaces":
-                  return json(await listSpaces(client));
-                case "nodes":
-                  return json(await listNodes(client, p.space_id, p.parent_node_token));
-                case "get":
-                  return json(await getNode(client, p.token));
-                case "search":
-                  return json({
-                    error:
-                      "Search is not available. Use feishu_wiki with action: 'nodes' to browse or action: 'get' to lookup by token.",
-                  });
-                case "create":
-                  return json(
-                    await createNode(client, p.space_id, p.title, p.obj_type, p.parent_node_token),
-                  );
-                case "move":
-                  return json(
-                    await moveNode(
-                      client,
-                      p.space_id,
-                      p.node_token,
-                      p.target_space_id,
-                      p.target_parent_token,
-                    ),
-                  );
-                case "rename":
-                  return json(await renameNode(client, p.space_id, p.node_token, p.title));
-                default:
-                  return json({ error: `Unknown action: ${(p as any).action}` });
-              }
-            },
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const e = err as Record<string, unknown>;
-          const effAcct = (e && typeof e === "object") ? (e._effectiveAccountId as string | undefined) : undefined;
-          return json({ error: msg, ...(effAcct ? { _effectiveAccountId: effAcct } : {}) });
-        }
-      },
-    })),
+    (ctx) => {
+      const defaultAccountId = ctx.agentAccountId;
+      return {
+        name: "feishu_wiki",
+        label: "Feishu Wiki",
+        description:
+          "Feishu knowledge base operations. Actions: spaces, nodes, get, create, move, rename",
+        parameters: FeishuWikiSchema,
+        async execute(_toolCallId, params) {
+          const p = params as FeishuWikiExecuteParams;
+          try {
+            const client = createFeishuToolClient({
+              api,
+              executeParams: p,
+              defaultAccountId,
+            });
+            switch (p.action) {
+              case "spaces":
+                return jsonToolResult(await listSpaces(client));
+              case "nodes":
+                return jsonToolResult(await listNodes(client, p.space_id, p.parent_node_token));
+              case "get":
+                return jsonToolResult(await getNode(client, p.token));
+              case "search":
+                return jsonToolResult({
+                  error:
+                    "Search is not available. Use feishu_wiki with action: 'nodes' to browse or action: 'get' to lookup by token.",
+                });
+              case "create":
+                return jsonToolResult(
+                  await createNode(client, p.space_id, p.title, p.obj_type, p.parent_node_token),
+                );
+              case "move":
+                return jsonToolResult(
+                  await moveNode(
+                    client,
+                    p.space_id,
+                    p.node_token,
+                    p.target_space_id,
+                    p.target_parent_token,
+                  ),
+                );
+              case "rename":
+                return jsonToolResult(await renameNode(client, p.space_id, p.node_token, p.title));
+              default:
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any -- exhaustive check fallback
+                return unknownToolActionResult((p as { action?: unknown }).action);
+            }
+          } catch (err) {
+            return toolExecutionErrorResult(err);
+          }
+        },
+      };
+    },
     { name: "feishu_wiki" },
   );
 
-  api.logger.debug?.("feishu_wiki: Registered feishu_wiki tool");
+  api.logger.info?.(`feishu_wiki: Registered feishu_wiki tool`);
 }

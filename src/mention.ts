@@ -1,6 +1,13 @@
 import type { FeishuMessageEvent } from "./bot.js";
 
 /**
+ * Escape regex metacharacters so user-controlled mention fields are treated literally.
+ */
+export function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
  * Mention target user info
  */
 export type MentionTarget = {
@@ -21,7 +28,9 @@ export function extractMentionTargets(
   return mentions
     .filter((m) => {
       // Exclude the bot itself
-      if (botOpenId && m.id.open_id === botOpenId) return false;
+      if (botOpenId && m.id.open_id === botOpenId) {
+        return false;
+      }
       // Must have open_id
       return !!m.id.open_id;
     })
@@ -38,14 +47,13 @@ export function extractMentionTargets(
  * - Group: message mentions bot + at least one other user
  * - DM: message mentions any user (no need to mention bot)
  */
-export function isMentionForwardRequest(
-  event: FeishuMessageEvent,
-  botOpenId?: string,
-): boolean {
+export function isMentionForwardRequest(event: FeishuMessageEvent, botOpenId?: string): boolean {
   const mentions = event.message.mentions ?? [];
-  if (mentions.length === 0) return false;
+  if (mentions.length === 0) {
+    return false;
+  }
 
-  const isDirectMessage = event.message.chat_type === "p2p";
+  const isDirectMessage = event.message.chat_type !== "group";
   const hasOtherMention = mentions.some((m) => m.id.open_id !== botOpenId);
 
   if (isDirectMessage) {
@@ -66,7 +74,7 @@ export function extractMessageBody(text: string, allMentionKeys: string[]): stri
 
   // Remove all @ placeholders
   for (const key of allMentionKeys) {
-    result = result.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "");
+    result = result.replace(new RegExp(escapeRegExp(key), "g"), "");
   }
 
   return result.replace(/\s+/g, " ").trim();
@@ -104,7 +112,9 @@ export function formatMentionAllForCard(): string {
  * Build complete message with @mentions (text format)
  */
 export function buildMentionedMessage(targets: MentionTarget[], message: string): string {
-  if (targets.length === 0) return message;
+  if (targets.length === 0) {
+    return message;
+  }
 
   const mentionParts = targets.map((t) => formatMentionForText(t));
   return `${mentionParts.join(" ")} ${message}`;
@@ -114,38 +124,10 @@ export function buildMentionedMessage(targets: MentionTarget[], message: string)
  * Build card content with @mentions (Markdown format)
  */
 export function buildMentionedCardContent(targets: MentionTarget[], message: string): string {
-  if (targets.length === 0) return message;
+  if (targets.length === 0) {
+    return message;
+  }
 
   const mentionParts = targets.map((t) => formatMentionForCard(t));
   return `${mentionParts.join(" ")} ${message}`;
-}
-
-/**
- * Render @mention placeholders in text for context/history storage:
- * - Bot's own mention → stripped (it's just a routing trigger)
- * - Other users' mentions → @displayName (preserves "talking to X" context)
- */
-export function renderMentionsForContext(
-  text: string,
-  mentions: FeishuMessageEvent["message"]["mentions"],
-  botOpenId?: string,
-): string {
-  if (!mentions || mentions.length === 0) return text;
-  let result = text;
-  for (const mention of mentions) {
-    const isBotMention = botOpenId && mention.id.open_id === botOpenId;
-    const escapedKey = mention.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (isBotMention) {
-      // Strip bot mention key (+ trailing space) and @name form
-      result = result.replace(new RegExp(escapedKey + "\\s*", "g"), "");
-      result = result.replace(
-        new RegExp(`@${mention.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`, "g"),
-        "",
-      );
-    } else {
-      // Replace placeholder key with readable @name
-      result = result.replace(new RegExp(escapedKey, "g"), `@${mention.name}`);
-    }
-  }
-  return result.replace(/\s+/g, " ").trim();
 }

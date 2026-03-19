@@ -1,147 +1,156 @@
-import type { FeishuProbeResult } from "./types.js";
+import { raceWithTimeoutAndAbort } from "./async.js";
 import { createFeishuClient, type FeishuClientCredentials } from "./client.js";
+import type { FeishuProbeResult } from "./types.js";
 
-const DECIMAL_RADIX = 10;
-const MINUTES_TO_MS = 60 * 1000;
-const MIN_VALID_TTL_MINUTES = 0;
-const DEFAULT_SUCCESS_CACHE_TTL_MINUTES = 15;
-const DEFAULT_ERROR_CACHE_TTL_MINUTES = 5;
-const FEISHU_API_SUCCESS_CODE = 0;
-const SUCCESS_CACHE_TTL_ENV_KEY = "FEISHU_PROBE_CACHE_TTL_MINUTES";
-const ERROR_CACHE_TTL_ENV_KEY = "FEISHU_PROBE_ERROR_CACHE_TTL_MINUTES";
+/** Cache probe results to reduce repeated health-check calls.
+ * Gateway health checks call probeFeishu() every minute; without caching this
+ * burns ~43,200 calls/month, easily exceeding Feishu's free-tier quota.
+ * Successful bot info is effectively static, while failures are cached briefly
+ * to avoid hammering the API during transient outages. */
+const probeCache = new Map<string, { result: FeishuProbeResult; expiresAt: number }>();
+const PROBE_SUCCESS_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const PROBE_ERROR_TTL_MS = 60 * 1000; // 1 minute
+const MAX_PROBE_CACHE_SIZE = 64;
+export const FEISHU_PROBE_REQUEST_TIMEOUT_MS = 10_000;
+export type ProbeFeishuOptions = {
+  timeoutMs?: number;
+  abortSignal?: AbortSignal;
+};
 
-// Cache for probe results to avoid API rate limits
-// Success TTL default: 15 minutes (900000 ms)
-// Can be customized via environment variable: FEISHU_PROBE_CACHE_TTL_MINUTES
-// Error TTL default: 5 minutes (300000 ms)
-// Can be customized via environment variable: FEISHU_PROBE_ERROR_CACHE_TTL_MINUTES
-function resolveCacheTtlMs(envKey: string, defaultMinutes: number): number {
-  const envTtl = process.env[envKey];
-  if (envTtl) {
-    const minutes = parseInt(envTtl, DECIMAL_RADIX);
-    if (!isNaN(minutes) && minutes > MIN_VALID_TTL_MINUTES) {
-      return minutes * MINUTES_TO_MS;
+type FeishuBotInfoResponse = {
+  code: number;
+  msg?: string;
+  bot?: { bot_name?: string; open_id?: string };
+  data?: { bot?: { bot_name?: string; open_id?: string } };
+};
+
+function setCachedProbeResult(
+  cacheKey: string,
+  result: FeishuProbeResult,
+  ttlMs: number,
+): FeishuProbeResult {
+  probeCache.set(cacheKey, { result, expiresAt: Date.now() + ttlMs });
+  if (probeCache.size > MAX_PROBE_CACHE_SIZE) {
+    const oldest = probeCache.keys().next().value;
+    if (oldest !== undefined) {
+      probeCache.delete(oldest);
     }
   }
-  return defaultMinutes * MINUTES_TO_MS;
+  return result;
 }
 
-const PROBE_CACHE_TTL_MS = resolveCacheTtlMs(
-  SUCCESS_CACHE_TTL_ENV_KEY,
-  DEFAULT_SUCCESS_CACHE_TTL_MINUTES,
-);
-
-interface ProbeCacheEntry {
-  result: FeishuProbeResult;
-  timestamp: number;
-  ttlMs: number;
-}
-
-const probeCache = new Map<string, ProbeCacheEntry>();
-const PROBE_ERROR_CACHE_TTL_MS = resolveCacheTtlMs(
-  ERROR_CACHE_TTL_ENV_KEY,
-  DEFAULT_ERROR_CACHE_TTL_MINUTES,
-);
-
-function getCacheKey(creds: FeishuClientCredentials): string {
-  return `${creds.appId}:${creds.domain || "feishu"}`;
-}
-
-function getCachedResult(creds: FeishuClientCredentials): FeishuProbeResult | null {
-  const key = getCacheKey(creds);
-  const cached = probeCache.get(key);
-  if (!cached) return null;
-  
-  const now = Date.now();
-  if (now - cached.timestamp > cached.ttlMs) {
-    // Cache expired
-    probeCache.delete(key);
-    return null;
-  }
-  
-  return cached.result;
-}
-
-function setCachedResult(creds: FeishuClientCredentials, result: FeishuProbeResult): void {
-  const key = getCacheKey(creds);
-  const ttlMs = result.ok ? PROBE_CACHE_TTL_MS : PROBE_ERROR_CACHE_TTL_MS;
-  probeCache.set(key, {
-    result,
-    timestamp: Date.now(),
-    ttlMs,
-  });
-}
-
-/**
- * Clear the probe cache for a specific account or all accounts.
- */
-export function clearProbeCache(accountId?: string): void {
-  if (accountId) {
-    // Find and delete entries matching the accountId
-    for (const [key, entry] of probeCache.entries()) {
-      if (key.startsWith(`${accountId}:`)) {
-        probeCache.delete(key);
-      }
-    }
-  } else {
-    probeCache.clear();
-  }
-}
-
-export async function probeFeishu(creds?: FeishuClientCredentials): Promise<FeishuProbeResult> {
+export async function probeFeishu(
+  creds?: FeishuClientCredentials,
+  options: ProbeFeishuOptions = {},
+): Promise<FeishuProbeResult> {
   if (!creds?.appId || !creds?.appSecret) {
     return {
       ok: false,
       error: "missing credentials (appId, appSecret)",
     };
   }
+  if (options.abortSignal?.aborted) {
+    return {
+      ok: false,
+      appId: creds.appId,
+      error: "probe aborted",
+    };
+  }
 
-  // Check cache first
-  const cached = getCachedResult(creds);
-  if (cached) {
-    return cached;
+  const timeoutMs = options.timeoutMs ?? FEISHU_PROBE_REQUEST_TIMEOUT_MS;
+
+  // Return cached result if still valid.
+  // Use accountId when available; otherwise include appSecret prefix so two
+  // accounts sharing the same appId (e.g. after secret rotation) don't
+  // pollute each other's cache entry.
+  const cacheKey = creds.accountId ?? `${creds.appId}:${creds.appSecret.slice(0, 8)}`;
+  const cached = probeCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.result;
   }
 
   try {
     const client = createFeishuClient(creds);
     // Use bot/v3/info API to get bot information
-    const response = await (client as any).request({
-      method: "GET",
-      url: "/open-apis/bot/v3/info",
-      data: {},
-    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK generic request method
+    const responseResult = await raceWithTimeoutAndAbort<FeishuBotInfoResponse>(
+      (client as any).request({
+        method: "GET",
+        url: "/open-apis/bot/v3/info",
+        data: {},
+        timeout: timeoutMs,
+      }) as Promise<FeishuBotInfoResponse>,
+      {
+        timeoutMs,
+        abortSignal: options.abortSignal,
+      },
+    );
 
-    if (response.code !== FEISHU_API_SUCCESS_CODE) {
-      const result: FeishuProbeResult = {
+    if (responseResult.status === "aborted") {
+      return {
         ok: false,
         appId: creds.appId,
-        error: `API error: ${response.msg || `code ${response.code}`}`,
+        error: "probe aborted",
       };
-      // Cache error results with error TTL to avoid hammering the API
-      setCachedResult(creds, result);
-      return result;
+    }
+    if (responseResult.status === "timeout") {
+      return setCachedProbeResult(
+        cacheKey,
+        {
+          ok: false,
+          appId: creds.appId,
+          error: `probe timed out after ${timeoutMs}ms`,
+        },
+        PROBE_ERROR_TTL_MS,
+      );
+    }
+
+    const response = responseResult.value;
+    if (options.abortSignal?.aborted) {
+      return {
+        ok: false,
+        appId: creds.appId,
+        error: "probe aborted",
+      };
+    }
+
+    if (response.code !== 0) {
+      return setCachedProbeResult(
+        cacheKey,
+        {
+          ok: false,
+          appId: creds.appId,
+          error: `API error: ${response.msg || `code ${response.code}`}`,
+        },
+        PROBE_ERROR_TTL_MS,
+      );
     }
 
     const bot = response.bot || response.data?.bot;
-    const result: FeishuProbeResult = {
-      ok: true,
-      appId: creds.appId,
-      botName: bot?.bot_name,
-      botOpenId: bot?.open_id,
-    };
-    
-    // Cache successful result
-    setCachedResult(creds, result);
-    
-    return result;
+    return setCachedProbeResult(
+      cacheKey,
+      {
+        ok: true,
+        appId: creds.appId,
+        botName: bot?.bot_name,
+        botOpenId: bot?.open_id,
+      },
+      PROBE_SUCCESS_TTL_MS,
+    );
   } catch (err) {
-    const result: FeishuProbeResult = {
-      ok: false,
-      appId: creds.appId,
-      error: err instanceof Error ? err.message : String(err),
-    };
-    // Cache error results with error TTL
-    setCachedResult(creds, result);
-    return result;
+    return setCachedProbeResult(
+      cacheKey,
+      {
+        ok: false,
+        appId: creds.appId,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      PROBE_ERROR_TTL_MS,
+    );
   }
+}
+
+/** Clear the probe cache (for testing). */
+export function clearProbeCache(): void {
+  probeCache.clear();
 }

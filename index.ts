@@ -1,5 +1,6 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/feishu";
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk/feishu";
+import { registerFeishuChatTools } from "./src/chat.js";
 import { feishuPlugin } from "./src/channel.js";
 import { setFeishuRuntime } from "./src/runtime.js";
 import { registerFeishuDocTools } from "./src/docx.js";
@@ -47,14 +48,15 @@ export {
 export { feishuPlugin } from "./src/channel.js";
 
 const plugin = {
-  id: "feishu",
+  id: "feishu-plus",
   name: "Feishu",
-  description: "Feishu/Lark channel plugin",
+  description: "Feishu channel plugin",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     setFeishuRuntime(api.runtime);
     api.registerChannel({ plugin: feishuPlugin });
     registerFeishuDocTools(api);
+    registerFeishuChatTools(api);
     registerFeishuWikiTools(api);
     registerFeishuDriveTools(api);
     registerFeishuPermTools(api);

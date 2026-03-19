@@ -1,23 +1,30 @@
 {
-  "name": "@m1heng-clawd/feishu",
+  "name": "feishu-plus",
   "version": "0.1.10",
   "type": "module",
-  "description": "OpenClaw Feishu/Lark channel plugin",
+  "description": "Maintained Feishu channel plugin for OpenClaw",
   "license": "MIT",
   "files": [
     "index.ts",
     "src",
     "skills",
-    "openclaw.plugin.json"
+    "openclaw.plugin.json",
+    "README.md",
+    "README.cn.md",
+    "NOTICE",
+    "LICENSE"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/m1heng/clawdbot-feishu.git"
+    "url": "git+https://github.com/hchen13/feishu-plus.git"
+  },
+  "homepage": "https://github.com/hchen13/feishu-plus#readme",
+  "bugs": {
+    "url": "https://github.com/hchen13/feishu-plus/issues"
   },
   "keywords": [
     "openclaw",
     "feishu",
-    "lark",
     "飞书",
     "chatbot",
     "ai",
@@ -30,33 +37,32 @@
     "channel": {
       "id": "feishu",
       "label": "Feishu",
-      "selectionLabel": "Feishu/Lark (飞书)",
+      "selectionLabel": "Feishu (飞书)",
       "docsPath": "/channels/feishu",
       "docsLabel": "feishu",
-      "blurb": "飞书/Lark enterprise messaging.",
-      "aliases": [
-        "lark"
-      ],
+      "blurb": "飞书 enterprise messaging.",
+      "aliases": [],
       "order": 70
     },
     "install": {
-      "npmSpec": "@m1heng-clawd/feishu",
+      "npmSpec": "github:hchen13/feishu-plus",
       "localPath": ".",
-      "defaultChoice": "npm"
+      "defaultChoice": "local"
     }
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@sinclair/typebox": "0.34.48",
+    "https-proxy-agent": "^8.0.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
-    "openclaw": "2026.2.13",
+    "openclaw": "2026.3.13",
     "tsx": "^4.21.0",
     "typescript": "^5.7.0"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.2.13"
+    "openclaw": ">=2026.3.13"
   }
 }

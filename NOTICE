@@ -1,0 +1,15 @@
+This project is a maintained derivative of m1heng/clawdbot-feishu and includes
+backported changes from the bundled Feishu extension shipped in openclaw/openclaw.
+
+Original upstreams:
+- https://github.com/m1heng/clawdbot-feishu
+- https://github.com/openclaw/openclaw
+
+This branch additionally carries local changes for:
+- multi-account routing
+- milestoneContext / group-summary injection
+- task and sheet tool registration
+- long-markdown delivery tuning
+- webhook hardening and persistent dedup backports
+
+See LICENSE for the governing MIT terms that apply to upstream-derived code.

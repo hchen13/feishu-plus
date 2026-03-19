@@ -1,6 +1,13 @@
-import type { ClawdbotConfig } from "openclaw/plugin-sdk";
-import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk";
-import type { FeishuConfig, FeishuAccountConfig, FeishuDomain, ResolvedFeishuAccount } from "./types.js";
+import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/account-id";
+import type { ClawdbotConfig } from "openclaw/plugin-sdk/feishu";
+import { normalizeResolvedSecretInputString, normalizeSecretInputString } from "./secret-input.js";
+import type {
+  FeishuConfig,
+  FeishuAccountConfig,
+  FeishuDefaultAccountSelectionSource,
+  FeishuDomain,
+  ResolvedFeishuAccount,
+} from "./types.js";
 
 /**
  * List all configured account IDs from the accounts field.
@@ -23,18 +30,42 @@ export function listFeishuAccountIds(cfg: ClawdbotConfig): string[] {
     // Backward compatibility: no accounts configured, use default
     return [DEFAULT_ACCOUNT_ID];
   }
-  return [...ids].sort((a, b) => a.localeCompare(b));
+  return [...ids].toSorted((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Resolve the default account selection and its source.
+ */
+export function resolveDefaultFeishuAccountSelection(cfg: ClawdbotConfig): {
+  accountId: string;
+  source: FeishuDefaultAccountSelectionSource;
+} {
+  const preferredRaw = (cfg.channels?.feishu as FeishuConfig | undefined)?.defaultAccount?.trim();
+  const preferred = preferredRaw ? normalizeAccountId(preferredRaw) : undefined;
+  if (preferred) {
+    return {
+      accountId: preferred,
+      source: "explicit-default",
+    };
+  }
+  const ids = listFeishuAccountIds(cfg);
+  if (ids.includes(DEFAULT_ACCOUNT_ID)) {
+    return {
+      accountId: DEFAULT_ACCOUNT_ID,
+      source: "mapped-default",
+    };
+  }
+  return {
+    accountId: ids[0] ?? DEFAULT_ACCOUNT_ID,
+    source: "fallback",
+  };
 }
 
 /**
  * Resolve the default account ID.
  */
 export function resolveDefaultFeishuAccountId(cfg: ClawdbotConfig): string {
-  const ids = listFeishuAccountIds(cfg);
-  if (ids.includes(DEFAULT_ACCOUNT_ID)) {
-    return DEFAULT_ACCOUNT_ID;
-  }
-  return ids[0] ?? DEFAULT_ACCOUNT_ID;
+  return resolveDefaultFeishuAccountSelection(cfg).accountId;
 }
 
 /**
@@ -55,14 +86,11 @@ function resolveAccountConfig(
  * Merge top-level config with account-specific config.
  * Account-specific fields override top-level fields.
  */
-function mergeFeishuAccountConfig(
-  cfg: ClawdbotConfig,
-  accountId: string,
-): FeishuConfig {
+function mergeFeishuAccountConfig(cfg: ClawdbotConfig, accountId: string): FeishuConfig {
   const feishuCfg = cfg.channels?.feishu as FeishuConfig | undefined;
 
   // Extract base config (exclude accounts field to avoid recursion)
-  const { accounts: _ignored, ...base } = feishuCfg ?? {};
+  const { accounts: _ignored, defaultAccount: _ignoredDefaultAccount, ...base } = feishuCfg ?? {};
 
   // Get account-specific overrides
   const account = resolveAccountConfig(cfg, accountId) ?? {};
@@ -80,15 +108,79 @@ export function resolveFeishuCredentials(cfg?: FeishuConfig): {
   encryptKey?: string;
   verificationToken?: string;
   domain: FeishuDomain;
+} | null;
+export function resolveFeishuCredentials(
+  cfg: FeishuConfig | undefined,
+  options: { allowUnresolvedSecretRef?: boolean },
+): {
+  appId: string;
+  appSecret: string;
+  encryptKey?: string;
+  verificationToken?: string;
+  domain: FeishuDomain;
+} | null;
+export function resolveFeishuCredentials(
+  cfg?: FeishuConfig,
+  options?: { allowUnresolvedSecretRef?: boolean },
+): {
+  appId: string;
+  appSecret: string;
+  encryptKey?: string;
+  verificationToken?: string;
+  domain: FeishuDomain;
 } | null {
-  const appId = cfg?.appId?.trim();
-  const appSecret = cfg?.appSecret?.trim();
-  if (!appId || !appSecret) return null;
+  const normalizeString = (value: unknown): string | undefined => {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  };
+
+  const resolveSecretLike = (value: unknown, path: string): string | undefined => {
+    const asString = normalizeString(value);
+    if (asString) {
+      return asString;
+    }
+
+    // In relaxed/onboarding paths only: allow direct env SecretRef reads for UX.
+    // Default resolution path must preserve unresolved-ref diagnostics/policy semantics.
+    if (options?.allowUnresolvedSecretRef && typeof value === "object" && value !== null) {
+      const rec = value as Record<string, unknown>;
+      const source = normalizeString(rec.source)?.toLowerCase();
+      const id = normalizeString(rec.id);
+      if (source === "env" && id) {
+        const envValue = normalizeString(process.env[id]);
+        if (envValue) {
+          return envValue;
+        }
+      }
+    }
+
+    if (options?.allowUnresolvedSecretRef) {
+      return normalizeSecretInputString(value);
+    }
+    return normalizeResolvedSecretInputString({ value, path });
+  };
+
+  const appId = resolveSecretLike(cfg?.appId, "channels.feishu.appId");
+  const appSecret = resolveSecretLike(cfg?.appSecret, "channels.feishu.appSecret");
+
+  if (!appId || !appSecret) {
+    return null;
+  }
+  const connectionMode = cfg?.connectionMode ?? "websocket";
   return {
     appId,
     appSecret,
-    encryptKey: cfg?.encryptKey?.trim() || undefined,
-    verificationToken: cfg?.verificationToken?.trim() || undefined,
+    encryptKey:
+      connectionMode === "webhook"
+        ? resolveSecretLike(cfg?.encryptKey, "channels.feishu.encryptKey")
+        : normalizeString(cfg?.encryptKey),
+    verificationToken: resolveSecretLike(
+      cfg?.verificationToken,
+      "channels.feishu.verificationToken",
+    ),
     domain: cfg?.domain ?? "feishu",
   };
 }
@@ -100,7 +192,17 @@ export function resolveFeishuAccount(params: {
   cfg: ClawdbotConfig;
   accountId?: string | null;
 }): ResolvedFeishuAccount {
-  const accountId = normalizeAccountId(params.accountId);
+  const hasExplicitAccountId =
+    typeof params.accountId === "string" && params.accountId.trim() !== "";
+  const defaultSelection = hasExplicitAccountId
+    ? null
+    : resolveDefaultFeishuAccountSelection(params.cfg);
+  const accountId = hasExplicitAccountId
+    ? normalizeAccountId(params.accountId)
+    : (defaultSelection?.accountId ?? DEFAULT_ACCOUNT_ID);
+  const selectionSource = hasExplicitAccountId
+    ? "explicit"
+    : (defaultSelection?.source ?? "fallback");
   const feishuCfg = params.cfg.channels?.feishu as FeishuConfig | undefined;
 
   // Base enabled state (top-level)
@@ -115,12 +217,14 @@ export function resolveFeishuAccount(params: {
 
   // Resolve credentials from merged config
   const creds = resolveFeishuCredentials(merged);
+  const accountName = (merged as FeishuAccountConfig).name;
 
   return {
     accountId,
+    selectionSource,
     enabled,
     configured: Boolean(creds),
-    name: (merged as FeishuAccountConfig).name?.trim() || undefined,
+    name: typeof accountName === "string" ? accountName.trim() || undefined : undefined,
     appId: creds?.appId,
     appSecret: creds?.appSecret,
     encryptKey: creds?.encryptKey,

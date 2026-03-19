@@ -3,119 +3,58 @@ import type {
   ChannelOnboardingDmPolicy,
   ClawdbotConfig,
   DmPolicy,
+  SecretInput,
   WizardPrompter,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/feishu";
 import {
-  addWildcardAllowFrom,
+  buildSingleChannelSecretPromptState,
   DEFAULT_ACCOUNT_ID,
   formatDocsLink,
-  normalizeAccountId,
-  promptAccountId,
-} from "openclaw/plugin-sdk";
-
-import {
-  listFeishuAccountIds,
-  resolveDefaultFeishuAccountId,
-  resolveFeishuAccount,
-  resolveFeishuCredentials,
-} from "./accounts.js";
+  hasConfiguredSecretInput,
+  mergeAllowFromEntries,
+  promptSingleChannelSecretInput,
+  setTopLevelChannelAllowFrom,
+  setTopLevelChannelDmPolicyWithAllowFrom,
+  setTopLevelChannelGroupPolicy,
+  splitOnboardingEntries,
+} from "openclaw/plugin-sdk/feishu";
+import { resolveFeishuCredentials } from "./accounts.js";
 import { probeFeishu } from "./probe.js";
 import type { FeishuConfig } from "./types.js";
 
 const channel = "feishu" as const;
 
-function resolveOnboardingAccountId(cfg: ClawdbotConfig, accountId?: string | null): string {
-  const raw = accountId?.trim();
-  if (raw) {
-    return normalizeAccountId(raw);
+function normalizeString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
   }
-  return resolveDefaultFeishuAccountId(cfg);
+  const trimmed = value.trim();
+  return trimmed || undefined;
 }
 
-function upsertFeishuAccountConfig(
-  cfg: ClawdbotConfig,
-  accountId: string,
-  patch: Partial<FeishuConfig>,
-): ClawdbotConfig {
-  const normalizedAccountId = normalizeAccountId(accountId);
-  const feishuCfg = cfg.channels?.feishu as FeishuConfig | undefined;
-
-  if (normalizedAccountId === DEFAULT_ACCOUNT_ID) {
-    return {
-      ...cfg,
-      channels: {
-        ...cfg.channels,
-        feishu: {
-          ...feishuCfg,
-          ...patch,
-        },
-      },
-    };
-  }
-
-  const existingAccount = feishuCfg?.accounts?.[normalizedAccountId];
-  return {
-    ...cfg,
-    channels: {
-      ...cfg.channels,
-      feishu: {
-        ...feishuCfg,
-        enabled: true,
-        accounts: {
-          ...feishuCfg?.accounts,
-          [normalizedAccountId]: {
-            ...existingAccount,
-            enabled: existingAccount?.enabled ?? true,
-            ...patch,
-          },
-        },
-      },
-    },
-  };
+function setFeishuDmPolicy(cfg: ClawdbotConfig, dmPolicy: DmPolicy): ClawdbotConfig {
+  return setTopLevelChannelDmPolicyWithAllowFrom({
+    cfg,
+    channel: "feishu",
+    dmPolicy,
+  }) as ClawdbotConfig;
 }
 
-function setFeishuDmPolicy(
-  cfg: ClawdbotConfig,
-  dmPolicy: DmPolicy,
-  accountId?: string,
-): ClawdbotConfig {
-  const resolvedAccountId = resolveOnboardingAccountId(cfg, accountId);
-  const account = resolveFeishuAccount({ cfg, accountId: resolvedAccountId });
-  // Feishu channel config does not support "disabled" as a dmPolicy value.
-  const effectiveDmPolicy = dmPolicy === "disabled" ? "pairing" : dmPolicy;
-  const allowFrom =
-    effectiveDmPolicy === "open"
-      ? addWildcardAllowFrom(account.config.allowFrom)?.map((entry) => String(entry))
-      : undefined;
-  return upsertFeishuAccountConfig(cfg, resolvedAccountId, {
-    dmPolicy: effectiveDmPolicy,
-    ...(allowFrom ? { allowFrom } : {}),
-  });
-}
-
-function setFeishuAllowFrom(cfg: ClawdbotConfig, allowFrom: string[], accountId?: string): ClawdbotConfig {
-  const resolvedAccountId = resolveOnboardingAccountId(cfg, accountId);
-  return upsertFeishuAccountConfig(cfg, resolvedAccountId, { allowFrom });
-}
-
-function parseAllowFromInput(raw: string): string[] {
-  return raw
-    .split(/[\n,;]+/g)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+function setFeishuAllowFrom(cfg: ClawdbotConfig, allowFrom: string[]): ClawdbotConfig {
+  return setTopLevelChannelAllowFrom({
+    cfg,
+    channel: "feishu",
+    allowFrom,
+  }) as ClawdbotConfig;
 }
 
 async function promptFeishuAllowFrom(params: {
   cfg: ClawdbotConfig;
   prompter: WizardPrompter;
-  accountId?: string;
 }): Promise<ClawdbotConfig> {
-  const accountId = resolveOnboardingAccountId(params.cfg, params.accountId);
-  const existing = resolveFeishuAccount({ cfg: params.cfg, accountId }).config.allowFrom ?? [];
-  const accountLabel = accountId === DEFAULT_ACCOUNT_ID ? "default" : accountId;
+  const existing = params.cfg.channels?.feishu?.allowFrom ?? [];
   await params.prompter.note(
     [
-      `Account: ${accountLabel}`,
       "Allowlist Feishu DMs by open_id or user_id.",
       "You can find user open_id in Feishu admin console or via API.",
       "Examples:",
@@ -132,16 +71,14 @@ async function promptFeishuAllowFrom(params: {
       initialValue: existing[0] ? String(existing[0]) : undefined,
       validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
     });
-    const parts = parseAllowFromInput(String(entry));
+    const parts = splitOnboardingEntries(String(entry));
     if (parts.length === 0) {
       await params.prompter.note("Enter at least one user.", "Feishu allowlist");
       continue;
     }
 
-    const unique = [
-      ...new Set([...existing.map((v) => String(v).trim()).filter(Boolean), ...parts]),
-    ];
-    return setFeishuAllowFrom(params.cfg, unique, accountId);
+    const unique = mergeAllowFromEntries(existing, parts);
+    return setFeishuAllowFrom(params.cfg, unique);
   }
 }
 
@@ -160,27 +97,43 @@ async function noteFeishuCredentialHelp(prompter: WizardPrompter): Promise<void>
   );
 }
 
+async function promptFeishuAppId(params: {
+  prompter: WizardPrompter;
+  initialValue?: string;
+}): Promise<string> {
+  const appId = String(
+    await params.prompter.text({
+      message: "Enter Feishu App ID",
+      initialValue: params.initialValue,
+      validate: (value) => (value?.trim() ? undefined : "Required"),
+    }),
+  ).trim();
+  return appId;
+}
+
 function setFeishuGroupPolicy(
   cfg: ClawdbotConfig,
   groupPolicy: "open" | "allowlist" | "disabled",
-  accountId?: string,
 ): ClawdbotConfig {
-  const resolvedAccountId = resolveOnboardingAccountId(cfg, accountId);
-  return upsertFeishuAccountConfig(cfg, resolvedAccountId, { enabled: true, groupPolicy });
+  return setTopLevelChannelGroupPolicy({
+    cfg,
+    channel: "feishu",
+    groupPolicy,
+    enabled: true,
+  }) as ClawdbotConfig;
 }
 
-function setFeishuGroupAllowFrom(
-  cfg: ClawdbotConfig,
-  groupAllowFrom: string[],
-  accountId?: string,
-): ClawdbotConfig {
-  const resolvedAccountId = resolveOnboardingAccountId(cfg, accountId);
-  return upsertFeishuAccountConfig(cfg, resolvedAccountId, { groupAllowFrom });
-}
-
-function setFeishuDomain(cfg: ClawdbotConfig, domain: "feishu" | "lark", accountId?: string): ClawdbotConfig {
-  const resolvedAccountId = resolveOnboardingAccountId(cfg, accountId);
-  return upsertFeishuAccountConfig(cfg, resolvedAccountId, { domain });
+function setFeishuGroupAllowFrom(cfg: ClawdbotConfig, groupAllowFrom: string[]): ClawdbotConfig {
+  return {
+    ...cfg,
+    channels: {
+      ...cfg.channels,
+      feishu: {
+        ...cfg.channels?.feishu,
+        groupAllowFrom,
+      },
+    },
+  };
 }
 
 const dmPolicy: ChannelOnboardingDmPolicy = {
@@ -188,30 +141,62 @@ const dmPolicy: ChannelOnboardingDmPolicy = {
   channel,
   policyKey: "channels.feishu.dmPolicy",
   allowFromKey: "channels.feishu.allowFrom",
-  getCurrent: (cfg) => {
-    const accountId = resolveDefaultFeishuAccountId(cfg);
-    return resolveFeishuAccount({ cfg, accountId }).config.dmPolicy ?? "pairing";
-  },
-  setPolicy: (cfg, policy, accountId?: string) => setFeishuDmPolicy(cfg, policy, accountId),
+  getCurrent: (cfg) => (cfg.channels?.feishu as FeishuConfig | undefined)?.dmPolicy ?? "pairing",
+  setPolicy: (cfg, policy) => setFeishuDmPolicy(cfg, policy),
   promptAllowFrom: promptFeishuAllowFrom,
 };
 
 export const feishuOnboardingAdapter: ChannelOnboardingAdapter = {
   channel,
-  getStatus: async ({ cfg, accountOverrides }) => {
-    const override = accountOverrides?.feishu?.trim();
-    const accountIds = override
-      ? [resolveOnboardingAccountId(cfg, override)]
-      : listFeishuAccountIds(cfg);
-    const accounts = accountIds.map((accountId) => resolveFeishuAccount({ cfg, accountId }));
-    const configuredAccounts = accounts.filter((account) => account.configured);
-    const configured = configuredAccounts.length > 0;
+  getStatus: async ({ cfg }) => {
+    const feishuCfg = cfg.channels?.feishu as FeishuConfig | undefined;
+
+    const isAppIdConfigured = (value: unknown): boolean => {
+      const asString = normalizeString(value);
+      if (asString) {
+        return true;
+      }
+      if (!value || typeof value !== "object") {
+        return false;
+      }
+      const rec = value as Record<string, unknown>;
+      const source = normalizeString(rec.source)?.toLowerCase();
+      const id = normalizeString(rec.id);
+      if (source === "env" && id) {
+        return Boolean(normalizeString(process.env[id]));
+      }
+      return hasConfiguredSecretInput(value);
+    };
+
+    const topLevelConfigured = Boolean(
+      isAppIdConfigured(feishuCfg?.appId) && hasConfiguredSecretInput(feishuCfg?.appSecret),
+    );
+
+    const accountConfigured = Object.values(feishuCfg?.accounts ?? {}).some((account) => {
+      if (!account || typeof account !== "object") {
+        return false;
+      }
+      const hasOwnAppId = Object.prototype.hasOwnProperty.call(account, "appId");
+      const hasOwnAppSecret = Object.prototype.hasOwnProperty.call(account, "appSecret");
+      const accountAppIdConfigured = hasOwnAppId
+        ? isAppIdConfigured((account as Record<string, unknown>).appId)
+        : isAppIdConfigured(feishuCfg?.appId);
+      const accountSecretConfigured = hasOwnAppSecret
+        ? hasConfiguredSecretInput((account as Record<string, unknown>).appSecret)
+        : hasConfiguredSecretInput(feishuCfg?.appSecret);
+      return Boolean(accountAppIdConfigured && accountSecretConfigured);
+    });
+
+    const configured = topLevelConfigured || accountConfigured;
+    const resolvedCredentials = resolveFeishuCredentials(feishuCfg, {
+      allowUnresolvedSecretRef: true,
+    });
 
     // Try to probe if configured
     let probeResult = null;
-    if (configuredAccounts[0]) {
+    if (configured && resolvedCredentials) {
       try {
-        probeResult = await probeFeishu(configuredAccounts[0]);
+        probeResult = await probeFeishu(resolvedCredentials);
       } catch {
         // Ignore probe errors
       }
@@ -221,16 +206,9 @@ export const feishuOnboardingAdapter: ChannelOnboardingAdapter = {
     if (!configured) {
       statusLines.push("Feishu: needs app credentials");
     } else if (probeResult?.ok) {
-      const probeAccountId = configuredAccounts[0]?.accountId ?? DEFAULT_ACCOUNT_ID;
-      const accountNote = probeAccountId === DEFAULT_ACCOUNT_ID ? "" : ` [${probeAccountId}]`;
       statusLines.push(
-        `Feishu${accountNote}: connected as ${probeResult.botName ?? probeResult.botOpenId ?? "bot"}`,
+        `Feishu: connected as ${probeResult.botName ?? probeResult.botOpenId ?? "bot"}`,
       );
-      if (!override && configuredAccounts.length > 1) {
-        statusLines.push(`Feishu: ${configuredAccounts.length} account(s) configured`);
-      }
-    } else if (!override && configuredAccounts.length > 1) {
-      statusLines.push(`Feishu: configured (${configuredAccounts.length} account(s), connection not verified)`);
     } else {
       statusLines.push("Feishu: configured (connection not verified)");
     }
@@ -244,152 +222,224 @@ export const feishuOnboardingAdapter: ChannelOnboardingAdapter = {
     };
   },
 
-  configure: async ({ cfg, prompter, accountOverrides, shouldPromptAccountIds }) => {
-    const feishuOverride = accountOverrides?.feishu?.trim();
-    const defaultFeishuAccountId = resolveDefaultFeishuAccountId(cfg);
-    let feishuAccountId = feishuOverride
-      ? normalizeAccountId(feishuOverride)
-      : defaultFeishuAccountId;
-    if (shouldPromptAccountIds && !feishuOverride) {
-      feishuAccountId = await promptAccountId({
-        cfg,
-        prompter,
-        label: "Feishu",
-        currentId: feishuAccountId,
-        listAccountIds: listFeishuAccountIds,
-        defaultAccountId: defaultFeishuAccountId,
-      });
-    }
-    const accountLabel = feishuAccountId === DEFAULT_ACCOUNT_ID ? "default" : feishuAccountId;
-    const currentAccount = resolveFeishuAccount({ cfg, accountId: feishuAccountId });
-    const resolved = resolveFeishuCredentials(currentAccount.config);
+  configure: async ({ cfg, prompter }) => {
+    const feishuCfg = cfg.channels?.feishu as FeishuConfig | undefined;
+    const resolved = resolveFeishuCredentials(feishuCfg, {
+      allowUnresolvedSecretRef: true,
+    });
+    const hasConfigSecret = hasConfiguredSecretInput(feishuCfg?.appSecret);
     const hasConfigCreds = Boolean(
-      currentAccount.config.appId?.trim() && currentAccount.config.appSecret?.trim(),
+      typeof feishuCfg?.appId === "string" && feishuCfg.appId.trim() && hasConfigSecret,
     );
-    const canUseEnv = Boolean(
-      feishuAccountId === DEFAULT_ACCOUNT_ID &&
-      !hasConfigCreds &&
-        process.env.FEISHU_APP_ID?.trim() &&
-        process.env.FEISHU_APP_SECRET?.trim(),
-    );
+    const appSecretPromptState = buildSingleChannelSecretPromptState({
+      accountConfigured: Boolean(resolved),
+      hasConfigToken: hasConfigSecret,
+      allowEnv: !hasConfigCreds && Boolean(process.env.FEISHU_APP_ID?.trim()),
+      envValue: process.env.FEISHU_APP_SECRET,
+    });
 
     let next = cfg;
     let appId: string | null = null;
-    let appSecret: string | null = null;
-    const appIdPrompt =
-      feishuAccountId === DEFAULT_ACCOUNT_ID
-        ? "Enter Feishu App ID"
-        : `Enter Feishu App ID for account "${accountLabel}"`;
-    const appSecretPrompt =
-      feishuAccountId === DEFAULT_ACCOUNT_ID
-        ? "Enter Feishu App Secret"
-        : `Enter Feishu App Secret for account "${accountLabel}"`;
+    let appSecret: SecretInput | null = null;
+    let appSecretProbeValue: string | null = null;
 
     if (!resolved) {
       await noteFeishuCredentialHelp(prompter);
     }
 
-    if (canUseEnv) {
-      const keepEnv = await prompter.confirm({
-        message: "FEISHU_APP_ID + FEISHU_APP_SECRET detected. Use env vars?",
-        initialValue: true,
+    const appSecretResult = await promptSingleChannelSecretInput({
+      cfg: next,
+      prompter,
+      providerHint: "feishu",
+      credentialLabel: "App Secret",
+      accountConfigured: appSecretPromptState.accountConfigured,
+      canUseEnv: appSecretPromptState.canUseEnv,
+      hasConfigToken: appSecretPromptState.hasConfigToken,
+      envPrompt: "FEISHU_APP_ID + FEISHU_APP_SECRET detected. Use env vars?",
+      keepPrompt: "Feishu App Secret already configured. Keep it?",
+      inputPrompt: "Enter Feishu App Secret",
+      preferredEnvVar: "FEISHU_APP_SECRET",
+    });
+
+    if (appSecretResult.action === "use-env") {
+      next = {
+        ...next,
+        channels: {
+          ...next.channels,
+          feishu: { ...next.channels?.feishu, enabled: true },
+        },
+      };
+    } else if (appSecretResult.action === "set") {
+      appSecret = appSecretResult.value;
+      appSecretProbeValue = appSecretResult.resolvedValue;
+      appId = await promptFeishuAppId({
+        prompter,
+        initialValue:
+          normalizeString(feishuCfg?.appId) ?? normalizeString(process.env.FEISHU_APP_ID),
       });
-      if (keepEnv) {
-        next = upsertFeishuAccountConfig(next, feishuAccountId, { enabled: true });
-      } else {
-        appId = String(
-          await prompter.text({
-            message: appIdPrompt,
-            validate: (value) => (value?.trim() ? undefined : "Required"),
-          }),
-        ).trim();
-        appSecret = String(
-          await prompter.text({
-            message: appSecretPrompt,
-            validate: (value) => (value?.trim() ? undefined : "Required"),
-          }),
-        ).trim();
-      }
-    } else if (hasConfigCreds) {
-      const keep = await prompter.confirm({
-        message: `Feishu credentials already configured for account "${accountLabel}". Keep them?`,
-        initialValue: true,
-      });
-      if (!keep) {
-        appId = String(
-          await prompter.text({
-            message: appIdPrompt,
-            validate: (value) => (value?.trim() ? undefined : "Required"),
-          }),
-        ).trim();
-        appSecret = String(
-          await prompter.text({
-            message: appSecretPrompt,
-            validate: (value) => (value?.trim() ? undefined : "Required"),
-          }),
-        ).trim();
-      }
-    } else {
-      appId = String(
-        await prompter.text({
-          message: appIdPrompt,
-          validate: (value) => (value?.trim() ? undefined : "Required"),
-        }),
-      ).trim();
-      appSecret = String(
-        await prompter.text({
-          message: appSecretPrompt,
-          validate: (value) => (value?.trim() ? undefined : "Required"),
-        }),
-      ).trim();
     }
 
     if (appId && appSecret) {
-      next = upsertFeishuAccountConfig(next, feishuAccountId, {
-        enabled: true,
-        appId,
-        appSecret,
-      });
+      next = {
+        ...next,
+        channels: {
+          ...next.channels,
+          feishu: {
+            ...next.channels?.feishu,
+            enabled: true,
+            appId,
+            appSecret,
+          },
+        },
+      };
 
       // Test connection
-      const testAccount = resolveFeishuAccount({ cfg: next, accountId: feishuAccountId });
       try {
-        const probe = await probeFeishu(testAccount);
+        const probe = await probeFeishu({
+          appId,
+          appSecret: appSecretProbeValue ?? undefined,
+          domain: (next.channels?.feishu as FeishuConfig | undefined)?.domain,
+        });
         if (probe.ok) {
           await prompter.note(
             `Connected as ${probe.botName ?? probe.botOpenId ?? "bot"}`,
-            `Feishu connection test (${accountLabel})`,
+            "Feishu connection test",
           );
         } else {
           await prompter.note(
             `Connection failed: ${probe.error ?? "unknown error"}`,
-            `Feishu connection test (${accountLabel})`,
+            "Feishu connection test",
           );
         }
       } catch (err) {
-        await prompter.note(
-          `Connection test failed: ${String(err)}`,
-          `Feishu connection test (${accountLabel})`,
-        );
+        await prompter.note(`Connection test failed: ${String(err)}`, "Feishu connection test");
       }
     }
 
-    // Domain selection
-    const currentDomain = resolveFeishuAccount({ cfg: next, accountId: feishuAccountId }).config.domain ?? "feishu";
-    const domain = await prompter.select({
-      message: "Which Feishu domain?",
+    const currentMode =
+      (next.channels?.feishu as FeishuConfig | undefined)?.connectionMode ?? "websocket";
+    const connectionMode = (await prompter.select({
+      message: "Feishu connection mode",
       options: [
-        { value: "feishu", label: "Feishu (feishu.cn) - China" },
-        { value: "lark", label: "Lark (larksuite.com) - International" },
+        { value: "websocket", label: "WebSocket (default)" },
+        { value: "webhook", label: "Webhook" },
       ],
-      initialValue: currentDomain,
-    });
-    if (domain) {
-      next = setFeishuDomain(next, domain as "feishu" | "lark", feishuAccountId);
+      initialValue: currentMode,
+    })) as "websocket" | "webhook";
+    next = {
+      ...next,
+      channels: {
+        ...next.channels,
+        feishu: {
+          ...next.channels?.feishu,
+          connectionMode,
+        },
+      },
+    };
+
+    if (connectionMode === "webhook") {
+      const currentVerificationToken = (next.channels?.feishu as FeishuConfig | undefined)
+        ?.verificationToken;
+      const verificationTokenPromptState = buildSingleChannelSecretPromptState({
+        accountConfigured: hasConfiguredSecretInput(currentVerificationToken),
+        hasConfigToken: hasConfiguredSecretInput(currentVerificationToken),
+        allowEnv: false,
+      });
+      const verificationTokenResult = await promptSingleChannelSecretInput({
+        cfg: next,
+        prompter,
+        providerHint: "feishu-webhook",
+        credentialLabel: "verification token",
+        accountConfigured: verificationTokenPromptState.accountConfigured,
+        canUseEnv: verificationTokenPromptState.canUseEnv,
+        hasConfigToken: verificationTokenPromptState.hasConfigToken,
+        envPrompt: "",
+        keepPrompt: "Feishu verification token already configured. Keep it?",
+        inputPrompt: "Enter Feishu verification token",
+        preferredEnvVar: "FEISHU_VERIFICATION_TOKEN",
+      });
+      if (verificationTokenResult.action === "set") {
+        next = {
+          ...next,
+          channels: {
+            ...next.channels,
+            feishu: {
+              ...next.channels?.feishu,
+              verificationToken: verificationTokenResult.value,
+            },
+          },
+        };
+      }
+      const currentEncryptKey = (next.channels?.feishu as FeishuConfig | undefined)?.encryptKey;
+      const encryptKeyPromptState = buildSingleChannelSecretPromptState({
+        accountConfigured: hasConfiguredSecretInput(currentEncryptKey),
+        hasConfigToken: hasConfiguredSecretInput(currentEncryptKey),
+        allowEnv: false,
+      });
+      const encryptKeyResult = await promptSingleChannelSecretInput({
+        cfg: next,
+        prompter,
+        providerHint: "feishu-webhook",
+        credentialLabel: "encrypt key",
+        accountConfigured: encryptKeyPromptState.accountConfigured,
+        canUseEnv: encryptKeyPromptState.canUseEnv,
+        hasConfigToken: encryptKeyPromptState.hasConfigToken,
+        envPrompt: "",
+        keepPrompt: "Feishu encrypt key already configured. Keep it?",
+        inputPrompt: "Enter Feishu encrypt key",
+        preferredEnvVar: "FEISHU_ENCRYPT_KEY",
+      });
+      if (encryptKeyResult.action === "set") {
+        next = {
+          ...next,
+          channels: {
+            ...next.channels,
+            feishu: {
+              ...next.channels?.feishu,
+              encryptKey: encryptKeyResult.value,
+            },
+          },
+        };
+      }
+      const currentWebhookPath = (next.channels?.feishu as FeishuConfig | undefined)?.webhookPath;
+      const webhookPath = String(
+        await prompter.text({
+          message: "Feishu webhook path",
+          initialValue: currentWebhookPath ?? "/feishu/events",
+          validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
+        }),
+      ).trim();
+      next = {
+        ...next,
+        channels: {
+          ...next.channels,
+          feishu: {
+            ...next.channels?.feishu,
+            webhookPath,
+          },
+        },
+      };
     }
 
+    // Domain selection: this distribution is Feishu-only. Keep existing custom
+    // private endpoints, otherwise normalize to the standard Feishu domain.
+    const currentDomain = (next.channels?.feishu as FeishuConfig | undefined)?.domain;
+    const normalizedDomain =
+      typeof currentDomain === "string" && currentDomain.startsWith("https://")
+        ? currentDomain
+        : "feishu";
+    next = {
+      ...next,
+      channels: {
+        ...next.channels,
+        feishu: {
+          ...next.channels?.feishu,
+          domain: normalizedDomain,
+        },
+      },
+    };
+
     // Group policy
-    const groupPolicyAccount = resolveFeishuAccount({ cfg: next, accountId: feishuAccountId });
     const groupPolicy = await prompter.select({
       message: "Group chat policy",
       options: [
@@ -397,34 +447,29 @@ export const feishuOnboardingAdapter: ChannelOnboardingAdapter = {
         { value: "open", label: "Open - respond in all groups (requires mention)" },
         { value: "disabled", label: "Disabled - don't respond in groups" },
       ],
-      initialValue: groupPolicyAccount.config.groupPolicy ?? "allowlist",
+      initialValue: (next.channels?.feishu as FeishuConfig | undefined)?.groupPolicy ?? "allowlist",
     });
     if (groupPolicy) {
-      next = setFeishuGroupPolicy(
-        next,
-        groupPolicy as "open" | "allowlist" | "disabled",
-        feishuAccountId,
-      );
+      next = setFeishuGroupPolicy(next, groupPolicy as "open" | "allowlist" | "disabled");
     }
 
     // Group allowlist if needed
     if (groupPolicy === "allowlist") {
-      const existing =
-        resolveFeishuAccount({ cfg: next, accountId: feishuAccountId }).config.groupAllowFrom ?? [];
+      const existing = (next.channels?.feishu as FeishuConfig | undefined)?.groupAllowFrom ?? [];
       const entry = await prompter.text({
         message: "Group chat allowlist (chat_ids)",
         placeholder: "oc_xxxxx, oc_yyyyy",
         initialValue: existing.length > 0 ? existing.map(String).join(", ") : undefined,
       });
       if (entry) {
-        const parts = parseAllowFromInput(String(entry));
+        const parts = splitOnboardingEntries(String(entry));
         if (parts.length > 0) {
-          next = setFeishuGroupAllowFrom(next, parts, feishuAccountId);
+          next = setFeishuGroupAllowFrom(next, parts);
         }
       }
     }
 
-    return { cfg: next, accountId: feishuAccountId };
+    return { cfg: next, accountId: DEFAULT_ACCOUNT_ID };
   },
 
   dmPolicy,

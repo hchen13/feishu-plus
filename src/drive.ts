@@ -1,30 +1,32 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type * as Lark from "@larksuiteoapi/node-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/feishu";
+import { listEnabledFeishuAccounts } from "./accounts.js";
 import { FeishuDriveSchema, type FeishuDriveParams } from "./drive-schema.js";
-import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient, makeFeishuToolFactory } from "./tools-common/tool-exec.js";
-import { writeDoc } from "./docx.js";
-
-// ============ Helpers ============
-
-function json(data: unknown) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-    details: data,
-  };
-}
+import { createFeishuToolClient, resolveAnyEnabledFeishuToolsConfig } from "./tool-account.js";
+import {
+  jsonToolResult,
+  toolExecutionErrorResult,
+  unknownToolActionResult,
+} from "./tool-result.js";
 
 // ============ Actions ============
 
 async function getRootFolderToken(client: Lark.Client): Promise<string> {
   // Use generic HTTP client to call the root folder meta API
   // as it's not directly exposed in the SDK
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- accessing internal SDK property
   const domain = (client as any).domain ?? "https://open.feishu.cn";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- accessing internal SDK property
   const res = (await (client as any).httpInstance.get(
     `${domain}/open-apis/drive/explorer/v2/root_folder/meta`,
   )) as { code: number; msg?: string; data?: { token?: string } };
-  if (res.code !== 0) throw new Error(res.msg ?? "Failed to get root folder");
+  if (res.code !== 0) {
+    throw new Error(res.msg ?? "Failed to get root folder");
+  }
   const token = res.data?.token;
-  if (!token) throw new Error("Root folder token not found");
+  if (!token) {
+    throw new Error("Root folder token not found");
+  }
   return token;
 }
 
@@ -34,7 +36,9 @@ async function listFolder(client: Lark.Client, folderToken?: string) {
   const res = await client.drive.file.list({
     params: validFolderToken ? { folder_token: validFolderToken } : {},
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     files:
@@ -56,7 +60,9 @@ async function getFileInfo(client: Lark.Client, fileToken: string, folderToken?:
   const res = await client.drive.file.list({
     params: folderToken ? { folder_token: folderToken } : {},
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   const file = res.data?.files?.find((f) => f.token === fileToken);
   if (!file) {
@@ -93,7 +99,9 @@ async function createFolder(client: Lark.Client, name: string, folderToken?: str
       folder_token: effectiveToken,
     },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     token: res.data?.token,
@@ -101,20 +109,25 @@ async function createFolder(client: Lark.Client, name: string, folderToken?: str
   };
 }
 
-async function moveFile(
-  client: Lark.Client,
-  fileToken: string,
-  type: string,
-  folderToken: string,
-) {
+async function moveFile(client: Lark.Client, fileToken: string, type: string, folderToken: string) {
   const res = await client.drive.file.move({
     path: { file_token: fileToken },
     data: {
-      type: type as "doc" | "docx" | "sheet" | "bitable" | "folder" | "file" | "mindnote" | "slides",
+      type: type as
+        | "doc"
+        | "docx"
+        | "sheet"
+        | "bitable"
+        | "folder"
+        | "file"
+        | "mindnote"
+        | "slides",
       folder_token: folderToken,
     },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     success: true,
@@ -138,56 +151,13 @@ async function deleteFile(client: Lark.Client, fileToken: string, type: string) 
         | "shortcut",
     },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     success: true,
     task_id: res.data?.task_id,
-  };
-}
-
-// ============ Import Document Functions ============
-
-/**
- * Import markdown content as a new Feishu document
- * Uses create + write approach for reliable content import.
- * Note: docType parameter is accepted for API compatibility but docx is always used.
- */
-async function importDocument(
-  client: Lark.Client,
-  title: string,
-  content: string,
-  mediaMaxBytes: number,
-  folderToken?: string,
-  _docType?: "docx" | "doc",
-) {
-  // Step 1: Create empty document
-  const createRes = await client.docx.document.create({
-    data: { title, folder_token: folderToken },
-  });
-  
-  if (createRes.code !== 0) {
-    throw new Error(`Failed to create document: ${createRes.msg}`);
-  }
-
-  const docId = createRes.data?.document?.document_id;
-  if (!docId) {
-    throw new Error("Document created but no document_id returned");
-  }
-
-  // Step 2: Write markdown content to the document
-  // This ensures proper structure preservation using the writeDoc function
-  const writeResult = await writeDoc(client, docId, content, mediaMaxBytes);
-
-  return {
-    success: true,
-    document_id: docId,
-    title: title,
-    url: `https://feishu.cn/docx/${docId}`,
-    import_method: "create_and_write",
-    blocks_added: writeResult.blocks_added,
-    images_processed: writeResult.images_processed,
-    ...("warning" in writeResult && { warning: writeResult.warning }),
   };
 }
 
@@ -199,73 +169,60 @@ export function registerFeishuDriveTools(api: OpenClawPluginApi) {
     return;
   }
 
-  if (!hasFeishuToolEnabledForAnyAccount(api.config)) {
+  const accounts = listEnabledFeishuAccounts(api.config);
+  if (accounts.length === 0) {
     api.logger.debug?.("feishu_drive: No Feishu accounts configured, skipping drive tools");
     return;
   }
 
-  if (!hasFeishuToolEnabledForAnyAccount(api.config, "drive")) {
+  const toolsCfg = resolveAnyEnabledFeishuToolsConfig(accounts);
+  if (!toolsCfg.drive) {
     api.logger.debug?.("feishu_drive: drive tool disabled in config");
     return;
   }
 
+  type FeishuDriveExecuteParams = FeishuDriveParams & { accountId?: string };
+
   api.registerTool(
-    makeFeishuToolFactory((agentAccountId, agentId) => ({
-      name: "feishu_drive",
-      label: "Feishu Drive",
-      description:
-        "Feishu cloud storage operations. Actions: list, info, create_folder, move, delete, import_document. Use 'import_document' to create documents from Markdown with better structure preservation than block-by-block writing.",
-      parameters: FeishuDriveSchema,
-      async execute(_toolCallId, params) {
-        const p = params as FeishuDriveParams;
-        const asAccountId = (params as any).asAccountId as string | undefined;
-        try {
-          return await withFeishuToolClient({
-            api,
-            toolName: "feishu_drive",
-            requiredTool: "drive",
-            agentAccountId,
-            agentId,
-            asAccountId,
-            run: async ({ client, account }) => {
-              const mediaMaxBytes = (account.config?.mediaMaxMb ?? 30) * 1024 * 1024;
-              switch (p.action) {
-                case "list":
-                  return json(await listFolder(client, p.folder_token));
-                case "info":
-                  return json(await getFileInfo(client, p.file_token));
-                case "create_folder":
-                  return json(await createFolder(client, p.name, p.folder_token));
-                case "move":
-                  return json(await moveFile(client, p.file_token, p.type, p.folder_token));
-                case "delete":
-                  return json(await deleteFile(client, p.file_token, p.type));
-                case "import_document":
-                  return json(
-                    await importDocument(
-                      client,
-                      p.title,
-                      p.content,
-                      mediaMaxBytes,
-                      p.folder_token,
-                      (p as any).doc_type || "docx",
-                    ),
-                  );
-                default:
-                  return json({ error: `Unknown action: ${(p as any).action}` });
-              }
-            },
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const e = err as Record<string, unknown>;
-          const effAcct = (e && typeof e === "object") ? (e._effectiveAccountId as string | undefined) : undefined;
-          return json({ error: msg, ...(effAcct ? { _effectiveAccountId: effAcct } : {}) });
-        }
-      },
-    })),
+    (ctx) => {
+      const defaultAccountId = ctx.agentAccountId;
+      return {
+        name: "feishu_drive",
+        label: "Feishu Drive",
+        description:
+          "Feishu cloud storage operations. Actions: list, info, create_folder, move, delete",
+        parameters: FeishuDriveSchema,
+        async execute(_toolCallId, params) {
+          const p = params as FeishuDriveExecuteParams;
+          try {
+            const client = createFeishuToolClient({
+              api,
+              executeParams: p,
+              defaultAccountId,
+            });
+            switch (p.action) {
+              case "list":
+                return jsonToolResult(await listFolder(client, p.folder_token));
+              case "info":
+                return jsonToolResult(await getFileInfo(client, p.file_token));
+              case "create_folder":
+                return jsonToolResult(await createFolder(client, p.name, p.folder_token));
+              case "move":
+                return jsonToolResult(await moveFile(client, p.file_token, p.type, p.folder_token));
+              case "delete":
+                return jsonToolResult(await deleteFile(client, p.file_token, p.type));
+              default:
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any -- exhaustive check fallback
+                return unknownToolActionResult((p as { action?: unknown }).action);
+            }
+          } catch (err) {
+            return toolExecutionErrorResult(err);
+          }
+        },
+      };
+    },
     { name: "feishu_drive" },
   );
 
-  api.logger.debug?.("feishu_drive: Registered feishu_drive tool");
+  api.logger.info?.(`feishu_drive: Registered feishu_drive tool`);
 }

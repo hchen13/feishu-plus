@@ -1,16 +1,13 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type * as Lark from "@larksuiteoapi/node-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/feishu";
+import { listEnabledFeishuAccounts } from "./accounts.js";
 import { FeishuPermSchema, type FeishuPermParams } from "./perm-schema.js";
-import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient, makeFeishuToolFactory } from "./tools-common/tool-exec.js";
-
-// ============ Helpers ============
-
-function json(data: unknown) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-    details: data,
-  };
-}
+import { createFeishuToolClient, resolveAnyEnabledFeishuToolsConfig } from "./tool-account.js";
+import {
+  jsonToolResult,
+  toolExecutionErrorResult,
+  unknownToolActionResult,
+} from "./tool-result.js";
 
 type ListTokenType =
   | "doc"
@@ -51,7 +48,9 @@ async function listMembers(client: Lark.Client, token: string, type: string) {
     path: { token },
     params: { type: type as ListTokenType },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     members:
@@ -81,7 +80,9 @@ async function addMember(
       perm: perm as PermType,
     },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     success: true,
@@ -100,7 +101,9 @@ async function removeMember(
     path: { token, member_id: memberId },
     params: { type: type as CreateTokenType, member_type: memberType as MemberType },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     success: true,
@@ -115,58 +118,59 @@ export function registerFeishuPermTools(api: OpenClawPluginApi) {
     return;
   }
 
-  if (!hasFeishuToolEnabledForAnyAccount(api.config)) {
+  const accounts = listEnabledFeishuAccounts(api.config);
+  if (accounts.length === 0) {
     api.logger.debug?.("feishu_perm: No Feishu accounts configured, skipping perm tools");
     return;
   }
 
-  if (!hasFeishuToolEnabledForAnyAccount(api.config, "perm")) {
+  const toolsCfg = resolveAnyEnabledFeishuToolsConfig(accounts);
+  if (!toolsCfg.perm) {
     api.logger.debug?.("feishu_perm: perm tool disabled in config (default: false)");
     return;
   }
 
+  type FeishuPermExecuteParams = FeishuPermParams & { accountId?: string };
+
   api.registerTool(
-    makeFeishuToolFactory((agentAccountId, agentId) => ({
-      name: "feishu_perm",
-      label: "Feishu Perm",
-      description: "Feishu permission management. Actions: list, add, remove",
-      parameters: FeishuPermSchema,
-      async execute(_toolCallId, params) {
-        const p = params as FeishuPermParams;
-        const asAccountId = (params as any).asAccountId as string | undefined;
-        try {
-          return await withFeishuToolClient({
-            api,
-            toolName: "feishu_perm",
-            requiredTool: "perm",
-            agentAccountId,
-            agentId,
-            asAccountId,
-            run: async ({ client }) => {
-              switch (p.action) {
-                case "list":
-                  return json(await listMembers(client, p.token, p.type));
-                case "add":
-                  return json(
-                    await addMember(client, p.token, p.type, p.member_type, p.member_id, p.perm),
-                  );
-                case "remove":
-                  return json(await removeMember(client, p.token, p.type, p.member_type, p.member_id));
-                default:
-                  return json({ error: `Unknown action: ${(p as any).action}` });
-              }
-            },
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const e = err as Record<string, unknown>;
-          const effAcct = (e && typeof e === "object") ? (e._effectiveAccountId as string | undefined) : undefined;
-          return json({ error: msg, ...(effAcct ? { _effectiveAccountId: effAcct } : {}) });
-        }
-      },
-    })),
+    (ctx) => {
+      const defaultAccountId = ctx.agentAccountId;
+      return {
+        name: "feishu_perm",
+        label: "Feishu Perm",
+        description: "Feishu permission management. Actions: list, add, remove",
+        parameters: FeishuPermSchema,
+        async execute(_toolCallId, params) {
+          const p = params as FeishuPermExecuteParams;
+          try {
+            const client = createFeishuToolClient({
+              api,
+              executeParams: p,
+              defaultAccountId,
+            });
+            switch (p.action) {
+              case "list":
+                return jsonToolResult(await listMembers(client, p.token, p.type));
+              case "add":
+                return jsonToolResult(
+                  await addMember(client, p.token, p.type, p.member_type, p.member_id, p.perm),
+                );
+              case "remove":
+                return jsonToolResult(
+                  await removeMember(client, p.token, p.type, p.member_type, p.member_id),
+                );
+              default:
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any -- exhaustive check fallback
+                return unknownToolActionResult((p as { action?: unknown }).action);
+            }
+          } catch (err) {
+            return toolExecutionErrorResult(err);
+          }
+        },
+      };
+    },
     { name: "feishu_perm" },
   );
 
-  api.logger.debug?.("feishu_perm: Registered feishu_perm tool");
+  api.logger.info?.(`feishu_perm: Registered feishu_perm tool`);
 }

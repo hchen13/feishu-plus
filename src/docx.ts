@@ -1,10 +1,28 @@
-import { Type } from "@sinclair/typebox";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { existsSync, promises as fs } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute } from "node:path";
+import { basename } from "node:path";
 import type * as Lark from "@larksuiteoapi/node-sdk";
-import { Readable } from "stream";
+import { Type } from "@sinclair/typebox";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/feishu";
+import { listEnabledFeishuAccounts } from "./accounts.js";
 import { FeishuDocSchema, type FeishuDocParams } from "./doc-schema.js";
+import { BATCH_SIZE, insertBlocksInBatches } from "./docx-batch-insert.js";
+import { updateColorText } from "./docx-color-text.js";
+import {
+  cleanBlocksForDescendant,
+  insertTableRow,
+  insertTableColumn,
+  deleteTableRows,
+  deleteTableColumns,
+  mergeTableCells,
+} from "./docx-table-ops.js";
 import { getFeishuRuntime } from "./runtime.js";
-import { hasFeishuToolEnabledForAnyAccount, withFeishuToolClient, makeFeishuToolFactory } from "./tools-common/tool-exec.js";
+import {
+  createFeishuToolClient,
+  resolveAnyEnabledFeishuToolsConfig,
+  resolveFeishuToolAccount,
+} from "./tool-account.js";
 
 // ============ Helpers ============
 
@@ -51,36 +69,10 @@ const BLOCK_TYPE_NAMES: Record<number, string> = {
 };
 
 // Block types that cannot be created via documentBlockChildren.create API
-const UNSUPPORTED_CREATE_TYPES = new Set([32]);
-
-/**
- * Reorder blocks according to firstLevelBlockIds from convertMarkdown API.
- * The API returns blocks as a flat unordered array across all levels.
- * firstLevelBlockIds provides the correct top-level document order.
- */
-function reorderBlocks(blocks: any[], firstLevelBlockIds: string[]): any[] {
-  if (!firstLevelBlockIds || firstLevelBlockIds.length === 0) return blocks;
-  
-  const blockMap = new Map<string, any>();
-  for (const block of blocks) {
-    if (block.block_id) {
-      blockMap.set(block.block_id, block);
-    }
-  }
-  
-  const ordered: any[] = [];
-  for (const id of firstLevelBlockIds) {
-    const block = blockMap.get(id);
-    if (block) {
-      ordered.push(block);
-    }
-  }
-
-  // If mapping unexpectedly fails, fall back to original to avoid hard data loss.
-  return ordered.length > 0 ? ordered : blocks;
-}
+const UNSUPPORTED_CREATE_TYPES = new Set([31, 32]);
 
 /** Clean blocks for insertion (remove unsupported types and read-only fields) */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block types
 function cleanBlocksForInsert(blocks: any[]): { cleaned: any[]; skipped: string[] } {
   const skipped: string[] = [];
   const cleaned = blocks
@@ -93,270 +85,51 @@ function cleanBlocksForInsert(blocks: any[]): { cleaned: any[]; skipped: string[
       return true;
     })
     .map((block) => {
-      const cleanedBlock = { ...block };
-      delete cleanedBlock.block_id;
-      delete cleanedBlock.parent_id;
-      delete cleanedBlock.children;
-
-      // Table cell IDs and merge metadata are not accepted in create payload.
-      if (cleanedBlock.block_type === 31 && cleanedBlock.table) {
-        const property = cleanedBlock.table.property ?? {};
-        const { merge_info, ...propertyRest } = property;
-        cleanedBlock.table = { property: propertyRest };
+      if (block.block_type === 31 && block.table?.merge_info) {
+        const { merge_info: _merge_info, ...tableRest } = block.table;
+        return { ...block, table: tableRest };
       }
-
-      return cleanedBlock;
+      return block;
     });
   return { cleaned, skipped };
 }
 
-function buildBlockMap(blocks: any[]): Map<string, any> {
-  const map = new Map<string, any>();
-  for (const block of blocks) {
-    if (block.block_id) map.set(block.block_id, block);
-  }
-  return map;
-}
-
-type InsertResult = { children: any[]; skipped: string[]; warnings: string[] };
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Known transient/throughput-related Feishu codes observed across endpoints.
-// Code matching is primary; message matching is fallback for undocumented new codes.
-const RETRYABLE_CREATE_ERROR_CODES = new Set<number>([
-  429, // HTTP-like throttle surfaces in some SDK wrappers
-  1254290, // Too many requests
-  1254291, // Write conflict
-  1255040, // Request timeout
-]);
-
-const RETRYABLE_MESSAGE_PATTERNS = [
-  /\brate\b/i,
-  /\bfrequency\b/i,
-  /\btoo many\b/i,
-  /\blimit\b/i,
-  /\bqps\b/i,
-  /频率/u,
-  /限流/u,
-];
-
-function isRetryableCreateError(code?: number, msg?: string) {
-  if (!code || code === 0) return false;
-  if (RETRYABLE_CREATE_ERROR_CODES.has(code)) return true;
-  const text = msg ?? "";
-  return RETRYABLE_MESSAGE_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-const CREATE_CHILDREN_RETRY_POLICY = {
-  maxAttempts: 4,
-  baseDelayMs: 250,
-  maxDelayMs: 2500,
-  jitterRatio: 0.2,
-} as const;
-
-function computeBackoffDelayMs(attempt: number, policy = CREATE_CHILDREN_RETRY_POLICY) {
-  const exp = Math.min(policy.maxDelayMs, policy.baseDelayMs * 2 ** (attempt - 1));
-  const jitter = exp * policy.jitterRatio;
-  const min = Math.max(0, exp - jitter);
-  const max = exp + jitter;
-  return Math.round(min + Math.random() * (max - min));
-}
-
-type CreateChildrenPayload = Parameters<Lark.Client["docx"]["documentBlockChildren"]["create"]>[0];
-type CreateChildrenResponse = Awaited<
-  ReturnType<Lark.Client["docx"]["documentBlockChildren"]["create"]>
->;
-
-async function executeWithBackoff<T>(args: {
-  operationName: string;
-  operation: () => Promise<T>;
-  isSuccess: (result: T) => boolean;
-  shouldRetry: (result: T) => boolean;
-  getMessage: (result: T) => string | undefined;
-  policy?: typeof CREATE_CHILDREN_RETRY_POLICY;
-}): Promise<T> {
-  const policy = args.policy ?? CREATE_CHILDREN_RETRY_POLICY;
-  let lastResult: T | undefined;
-
-  for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
-    const result = await args.operation();
-    lastResult = result;
-
-    if (args.isSuccess(result)) return result;
-    if (!args.shouldRetry(result) || attempt === policy.maxAttempts) return result;
-
-    const delayMs = computeBackoffDelayMs(attempt, policy);
-    const msg = args.getMessage(result) ?? "unknown error";
-    console.warn(
-      `[feishu_doc] ${args.operationName} retry ${attempt}/${policy.maxAttempts - 1} after ${delayMs}ms: ${msg}`,
-    );
-    await sleep(delayMs);
-  }
-
-  return lastResult!;
-}
-
-async function createChildrenWithRetry(
-  client: Lark.Client,
-  payload: CreateChildrenPayload,
-  policy = CREATE_CHILDREN_RETRY_POLICY,
-) {
-  return executeWithBackoff<CreateChildrenResponse>({
-    operationName: "docx.documentBlockChildren.create",
-    operation: () => client.docx.documentBlockChildren.create(payload),
-    isSuccess: (res) => res.code === 0,
-    shouldRetry: (res) => isRetryableCreateError(res.code, res.msg),
-    getMessage: (res) => res.msg,
-    policy,
-  });
-}
-
-async function insertTableWithCells(
-  client: Lark.Client,
-  docToken: string,
-  tableBlock: any,
-  blockMap: Map<string, any>,
-  parentBlockId?: string,
-): Promise<InsertResult> {
-  const tableInsert = await insertBlocks(client, docToken, [tableBlock], parentBlockId);
-  const insertedTable = tableInsert.children[0];
-
-  if (!insertedTable || insertedTable.block_type !== 31) {
-    return {
-      children: tableInsert.children,
-      skipped: tableInsert.skipped,
-      warnings: ["Table block was not returned after create; skipped table cell content."],
-    };
-  }
-
-  const srcCells: string[] = tableBlock.table?.cells ?? [];
-  const dstCells: string[] = insertedTable.table?.cells ?? [];
-  if (srcCells.length === 0) {
-    return { children: tableInsert.children, skipped: tableInsert.skipped, warnings: [] };
-  }
-
-  if (dstCells.length === 0) {
-    return {
-      children: tableInsert.children,
-      skipped: tableInsert.skipped,
-      warnings: ["Table created but API did not return generated cells; table content may be empty."],
-    };
-  }
-
-  const copiedChildren: any[] = [];
-  const allSkipped = [...tableInsert.skipped];
-  const warnings: string[] = [];
-  let sourceCellsWithContent = 0;
-  let copiedCellCount = 0;
-
-  const cellCount = Math.min(srcCells.length, dstCells.length);
-  for (let i = 0; i < cellCount; i++) {
-    const srcCellId = srcCells[i];
-    const dstCellId = dstCells[i];
-    const srcCell = blockMap.get(srcCellId);
-    const srcChildIds: string[] = srcCell?.children ?? [];
-    let srcChildBlocks = srcChildIds
-      .map((id) => blockMap.get(id))
-      .filter((b): b is any => Boolean(b));
-
-    // Some convert payloads may carry plain text directly on table_cell.
-    if (srcChildBlocks.length === 0 && srcCell?.text?.elements?.length) {
-      srcChildBlocks = [{ block_type: 2, text: srcCell.text }];
-    }
-    if (srcChildBlocks.length === 0 && srcCell?.table_cell?.text?.elements?.length) {
-      srcChildBlocks = [{ block_type: 2, text: srcCell.table_cell.text }];
-    }
-
-    if (srcChildBlocks.length === 0) continue;
-    sourceCellsWithContent++;
-
-    const cellInsert = await insertBlocksInBatches(client, docToken, srcChildBlocks, dstCellId);
-    copiedChildren.push(...cellInsert.children);
-    allSkipped.push(...cellInsert.skipped);
-    if (cellInsert.children.length > 0) copiedCellCount++;
-  }
-
-  if (srcCells.length !== dstCells.length) {
-    warnings.push(
-      `Table cell count mismatch after create (source=${srcCells.length}, target=${dstCells.length}); content may be partially copied.`,
-    );
-  }
-  if (sourceCellsWithContent > 0 && copiedCellCount < sourceCellsWithContent) {
-    warnings.push(
-      `Copied table cell content for ${copiedCellCount}/${sourceCellsWithContent} non-empty cells.`,
-    );
-  }
-
-  return {
-    children: [...tableInsert.children, ...copiedChildren],
-    skipped: [...new Set(allSkipped)],
-    warnings,
-  };
-}
-
-async function insertBlocksPreservingTables(
-  client: Lark.Client,
-  docToken: string,
-  blocks: any[],
-  blockMap: Map<string, any>,
-  parentBlockId?: string,
-): Promise<InsertResult> {
-  const inserted: any[] = [];
-  const skipped: string[] = [];
-  const warnings: string[] = [];
-  const buffer: any[] = [];
-
-  const flushBuffer = async () => {
-    if (buffer.length === 0) return;
-    const res = await insertBlocksInBatches(client, docToken, buffer, parentBlockId);
-    inserted.push(...res.children);
-    skipped.push(...res.skipped);
-    buffer.length = 0;
-  };
-
-  for (const block of blocks) {
-    if (block.block_type === 31) {
-      await flushBuffer();
-      const tableRes = await insertTableWithCells(client, docToken, block, blockMap, parentBlockId);
-      inserted.push(...tableRes.children);
-      skipped.push(...tableRes.skipped);
-      warnings.push(...tableRes.warnings);
-      continue;
-    }
-    buffer.push(block);
-  }
-
-  await flushBuffer();
-
-  return {
-    children: inserted,
-    skipped: [...new Set(skipped)],
-    warnings: [...new Set(warnings)],
-  };
-}
-
 // ============ Core Functions ============
+
+/** Max blocks per documentBlockChildren.create request */
+const MAX_BLOCKS_PER_INSERT = 50;
+const MAX_CONVERT_RETRY_DEPTH = 8;
 
 async function convertMarkdown(client: Lark.Client, markdown: string) {
   const res = await client.docx.document.convert({
     data: { content_type: "markdown", content: markdown },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
   return {
     blocks: res.data?.blocks ?? [],
     firstLevelBlockIds: res.data?.first_level_block_ids ?? [],
   };
 }
 
+function sortBlocksByFirstLevel(blocks: any[], firstLevelIds: string[]): any[] {
+  if (!firstLevelIds || firstLevelIds.length === 0) return blocks;
+  const sorted = firstLevelIds.map((id) => blocks.find((b) => b.block_id === id)).filter(Boolean);
+  const sortedIds = new Set(firstLevelIds);
+  const remaining = blocks.filter((b) => !sortedIds.has(b.block_id));
+  return [...sorted, ...remaining];
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any -- SDK block types */
 async function insertBlocks(
   client: Lark.Client,
   docToken: string,
   blocks: any[],
   parentBlockId?: string,
+  index?: number,
 ): Promise<{ children: any[]; skipped: string[] }> {
+  /* eslint-enable @typescript-eslint/no-explicit-any */
   const { cleaned, skipped } = cleanBlocksForInsert(blocks);
   const blockId = parentBlockId ?? docToken;
 
@@ -364,19 +137,203 @@ async function insertBlocks(
     return { children: [], skipped };
   }
 
-  const res = await createChildrenWithRetry(client, {
-    path: { document_id: docToken, block_id: blockId },
-    data: { children: cleaned },
+  // Insert blocks one at a time to preserve document order.
+  // The batch API (sending all children at once) does not guarantee ordering
+  // because Feishu processes the batch asynchronously.  Sequential single-block
+  // inserts (each appended to the end) produce deterministic results.
+  const allInserted: any[] = [];
+  for (const [offset, block] of cleaned.entries()) {
+    const res = await client.docx.documentBlockChildren.create({
+      path: { document_id: docToken, block_id: blockId },
+      data: {
+        children: [block],
+        ...(index !== undefined ? { index: index + offset } : {}),
+      },
+    });
+    if (res.code !== 0) {
+      throw new Error(res.msg);
+    }
+    allInserted.push(...(res.data?.children ?? []));
+  }
+  return { children: allInserted, skipped };
+}
+
+/** Split markdown into chunks at top-level headings (# or ##) to stay within API content limits */
+function splitMarkdownByHeadings(markdown: string): string[] {
+  const lines = markdown.split("\n");
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let inFencedBlock = false;
+
+  for (const line of lines) {
+    if (/^(`{3,}|~{3,})/.test(line)) {
+      inFencedBlock = !inFencedBlock;
+    }
+    if (!inFencedBlock && /^#{1,2}\s/.test(line) && current.length > 0) {
+      chunks.push(current.join("\n"));
+      current = [];
+    }
+    current.push(line);
+  }
+  if (current.length > 0) {
+    chunks.push(current.join("\n"));
+  }
+  return chunks;
+}
+
+/** Split markdown by size, preferring to break outside fenced code blocks when possible */
+function splitMarkdownBySize(markdown: string, maxChars: number): string[] {
+  if (markdown.length <= maxChars) {
+    return [markdown];
+  }
+
+  const lines = markdown.split("\n");
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let currentLength = 0;
+  let inFencedBlock = false;
+
+  for (const line of lines) {
+    if (/^(`{3,}|~{3,})/.test(line)) {
+      inFencedBlock = !inFencedBlock;
+    }
+
+    const lineLength = line.length + 1;
+    const wouldExceed = currentLength + lineLength > maxChars;
+    if (current.length > 0 && wouldExceed && !inFencedBlock) {
+      chunks.push(current.join("\n"));
+      current = [];
+      currentLength = 0;
+    }
+
+    current.push(line);
+    currentLength += lineLength;
+  }
+
+  if (current.length > 0) {
+    chunks.push(current.join("\n"));
+  }
+
+  if (chunks.length > 1) {
+    return chunks;
+  }
+
+  // Degenerate case: no safe boundary outside fenced content.
+  const midpoint = Math.floor(lines.length / 2);
+  if (midpoint <= 0 || midpoint >= lines.length) {
+    return [markdown];
+  }
+  return [lines.slice(0, midpoint).join("\n"), lines.slice(midpoint).join("\n")];
+}
+
+async function convertMarkdownWithFallback(client: Lark.Client, markdown: string, depth = 0) {
+  try {
+    return await convertMarkdown(client, markdown);
+  } catch (error) {
+    if (depth >= MAX_CONVERT_RETRY_DEPTH || markdown.length < 2) {
+      throw error;
+    }
+
+    const splitTarget = Math.max(256, Math.floor(markdown.length / 2));
+    const chunks = splitMarkdownBySize(markdown, splitTarget);
+    if (chunks.length <= 1) {
+      throw error;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block types
+    const blocks: any[] = [];
+    const firstLevelBlockIds: string[] = [];
+
+    for (const chunk of chunks) {
+      const converted = await convertMarkdownWithFallback(client, chunk, depth + 1);
+      blocks.push(...converted.blocks);
+      firstLevelBlockIds.push(...converted.firstLevelBlockIds);
+    }
+
+    return { blocks, firstLevelBlockIds };
+  }
+}
+
+/** Convert markdown in chunks to avoid document.convert content size limits */
+async function chunkedConvertMarkdown(client: Lark.Client, markdown: string) {
+  const chunks = splitMarkdownByHeadings(markdown);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block types
+  const allBlocks: any[] = [];
+  const allFirstLevelBlockIds: string[] = [];
+  for (const chunk of chunks) {
+    const { blocks, firstLevelBlockIds } = await convertMarkdownWithFallback(client, chunk);
+    const sorted = sortBlocksByFirstLevel(blocks, firstLevelBlockIds);
+    allBlocks.push(...sorted);
+    allFirstLevelBlockIds.push(...firstLevelBlockIds);
+  }
+  return { blocks: allBlocks, firstLevelBlockIds: allFirstLevelBlockIds };
+}
+
+/** Insert blocks in batches of MAX_BLOCKS_PER_INSERT to avoid API 400 errors */
+/* eslint-disable @typescript-eslint/no-explicit-any -- SDK block types */
+async function chunkedInsertBlocks(
+  client: Lark.Client,
+  docToken: string,
+  blocks: any[],
+  parentBlockId?: string,
+): Promise<{ children: any[]; skipped: string[] }> {
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block types
+  const allChildren: any[] = [];
+  const allSkipped: string[] = [];
+
+  for (let i = 0; i < blocks.length; i += MAX_BLOCKS_PER_INSERT) {
+    const batch = blocks.slice(i, i + MAX_BLOCKS_PER_INSERT);
+    const { children, skipped } = await insertBlocks(client, docToken, batch, parentBlockId);
+    allChildren.push(...children);
+    allSkipped.push(...skipped);
+  }
+
+  return { children: allChildren, skipped: allSkipped };
+}
+
+type Logger = { info?: (msg: string) => void };
+
+/**
+ * Insert blocks using the Descendant API (supports tables, nested lists, large docs).
+ * Unlike the Children API, this supports block_type 31/32 (Table/TableCell).
+ *
+ * @param parentBlockId - Parent block to insert into (defaults to docToken = document root)
+ * @param index - Position within parent's children (-1 = end, 0 = first)
+ */
+/* eslint-disable @typescript-eslint/no-explicit-any -- SDK block types */
+async function insertBlocksWithDescendant(
+  client: Lark.Client,
+  docToken: string,
+  blocks: any[],
+  firstLevelBlockIds: string[],
+  { parentBlockId = docToken, index = -1 }: { parentBlockId?: string; index?: number } = {},
+): Promise<{ children: any[] }> {
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+  const descendants = cleanBlocksForDescendant(blocks);
+  if (descendants.length === 0) {
+    return { children: [] };
+  }
+
+  const res = await client.docx.documentBlockDescendant.create({
+    path: { document_id: docToken, block_id: parentBlockId },
+    data: { children_id: firstLevelBlockIds, descendants, index },
   });
-  if (res.code !== 0) throw new Error(res.msg);
-  return { children: res.data?.children ?? [], skipped };
+
+  if (res.code !== 0) {
+    throw new Error(`${res.msg} (code: ${res.code})`);
+  }
+
+  return { children: res.data?.children ?? [] };
 }
 
 async function clearDocumentContent(client: Lark.Client, docToken: string) {
   const existing = await client.docx.documentBlock.list({
     path: { document_id: docToken },
   });
-  if (existing.code !== 0) throw new Error(existing.msg);
+  if (existing.code !== 0) {
+    throw new Error(existing.msg);
+  }
 
   const childIds =
     existing.data?.items
@@ -388,7 +345,9 @@ async function clearDocumentContent(client: Lark.Client, docToken: string) {
       path: { document_id: docToken, block_id: docToken },
       data: { start_index: 0, end_index: childIds.length },
     });
-    if (res.code !== 0) throw new Error(res.msg);
+    if (res.code !== 0) {
+      throw new Error(res.msg);
+    }
   }
 
   return childIds.length;
@@ -399,6 +358,7 @@ async function uploadImageToDocx(
   blockId: string,
   imageBuffer: Buffer,
   fileName: string,
+  docToken?: string,
 ): Promise<string> {
   const res = await client.drive.media.uploadAll({
     data: {
@@ -406,7 +366,15 @@ async function uploadImageToDocx(
       parent_type: "docx_image",
       parent_node: blockId,
       size: imageBuffer.length,
-      file: Readable.from(imageBuffer) as any,
+      // Pass Buffer directly so form-data can calculate Content-Length correctly.
+      // Readable.from() produces a stream with unknown length, causing Content-Length
+      // mismatch that silently truncates uploads for images larger than ~1KB.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK file type
+      file: imageBuffer as any,
+      // Required when the document block belongs to a non-default datacenter:
+      // tells the drive service which document the block belongs to for routing.
+      // Per API docs: certain upload scenarios require the cloud document token.
+      ...(docToken ? { extra: JSON.stringify({ drive_route_token: docToken }) } : {}),
     },
   });
 
@@ -422,6 +390,143 @@ async function downloadImage(url: string, maxBytes: number): Promise<Buffer> {
   return fetched.buffer;
 }
 
+async function resolveUploadInput(
+  url: string | undefined,
+  filePath: string | undefined,
+  maxBytes: number,
+  explicitFileName?: string,
+  imageInput?: string, // data URI, plain base64, or local path
+): Promise<{ buffer: Buffer; fileName: string }> {
+  // Enforce mutual exclusivity: exactly one input source must be provided.
+  const inputSources = (
+    [url ? "url" : null, filePath ? "file_path" : null, imageInput ? "image" : null] as (
+      | string
+      | null
+    )[]
+  ).filter(Boolean);
+  if (inputSources.length > 1) {
+    throw new Error(`Provide only one image source; got: ${inputSources.join(", ")}`);
+  }
+
+  // data URI: data:image/png;base64,xxxx
+  if (imageInput?.startsWith("data:")) {
+    const commaIdx = imageInput.indexOf(",");
+    if (commaIdx === -1) {
+      throw new Error("Invalid data URI: missing comma separator.");
+    }
+    const header = imageInput.slice(0, commaIdx);
+    const data = imageInput.slice(commaIdx + 1);
+    // Only base64-encoded data URIs are supported; reject plain/URL-encoded ones.
+    if (!header.includes(";base64")) {
+      throw new Error(
+        `Invalid data URI: missing ';base64' marker. ` +
+          `Expected format: data:image/png;base64,<base64data>`,
+      );
+    }
+    // Validate the payload is actually base64 before decoding; Node's decoder
+    // is permissive and would silently accept garbage bytes otherwise.
+    const trimmedData = data.trim();
+    if (trimmedData.length === 0 || !/^[A-Za-z0-9+/]+=*$/.test(trimmedData)) {
+      throw new Error(
+        `Invalid data URI: base64 payload contains characters outside the standard alphabet.`,
+      );
+    }
+    const mimeMatch = header.match(/data:([^;]+)/);
+    const ext = mimeMatch?.[1]?.split("/")[1] ?? "png";
+    // Estimate decoded byte count from base64 length BEFORE allocating the
+    // full buffer to avoid spiking memory on oversized payloads.
+    const estimatedBytes = Math.ceil((trimmedData.length * 3) / 4);
+    if (estimatedBytes > maxBytes) {
+      throw new Error(
+        `Image data URI exceeds limit: estimated ${estimatedBytes} bytes > ${maxBytes} bytes`,
+      );
+    }
+    const buffer = Buffer.from(trimmedData, "base64");
+    return { buffer, fileName: explicitFileName ?? `image.${ext}` };
+  }
+
+  // local path: ~, ./ and ../ are unambiguous (not in base64 alphabet).
+  // Absolute paths (/...) are supported but must exist on disk. If an absolute
+  // path does not exist we throw immediately rather than falling through to
+  // base64 decoding, which would silently upload garbage bytes.
+  // Note: JPEG base64 starts with "/9j/" — pass as data:image/jpeg;base64,...
+  // to avoid ambiguity with absolute paths.
+  if (imageInput) {
+    const candidate = imageInput.startsWith("~") ? imageInput.replace(/^~/, homedir()) : imageInput;
+    const unambiguousPath =
+      imageInput.startsWith("~") || imageInput.startsWith("./") || imageInput.startsWith("../");
+    const absolutePath = isAbsolute(imageInput);
+
+    if (unambiguousPath || (absolutePath && existsSync(candidate))) {
+      const buffer = await fs.readFile(candidate);
+      if (buffer.length > maxBytes) {
+        throw new Error(`Local file exceeds limit: ${buffer.length} bytes > ${maxBytes} bytes`);
+      }
+      return { buffer, fileName: explicitFileName ?? basename(candidate) };
+    }
+
+    if (absolutePath && !existsSync(candidate)) {
+      throw new Error(
+        `File not found: "${candidate}". ` +
+          `If you intended to pass image binary data, use a data URI instead: data:image/jpeg;base64,...`,
+      );
+    }
+  }
+
+  // plain base64 string (standard base64 alphabet includes '+', '/', '=')
+  if (imageInput) {
+    const trimmed = imageInput.trim();
+    // Node's Buffer.from is permissive and silently ignores out-of-alphabet chars,
+    // which would decode malformed strings into arbitrary bytes. Reject early.
+    if (trimmed.length === 0 || !/^[A-Za-z0-9+/]+=*$/.test(trimmed)) {
+      throw new Error(
+        `Invalid base64: image input contains characters outside the standard base64 alphabet. ` +
+          `Use a data URI (data:image/png;base64,...) or a local file path instead.`,
+      );
+    }
+    // Estimate decoded byte count from base64 length BEFORE allocating the
+    // full buffer to avoid spiking memory on oversized payloads.
+    const estimatedBytes = Math.ceil((trimmed.length * 3) / 4);
+    if (estimatedBytes > maxBytes) {
+      throw new Error(
+        `Base64 image exceeds limit: estimated ${estimatedBytes} bytes > ${maxBytes} bytes`,
+      );
+    }
+    const buffer = Buffer.from(trimmed, "base64");
+    if (buffer.length === 0) {
+      throw new Error("Base64 image decoded to empty buffer; check the input.");
+    }
+    return { buffer, fileName: explicitFileName ?? "image.png" };
+  }
+
+  if (!url && !filePath) {
+    throw new Error("Either url, file_path, or image (base64/data URI) must be provided");
+  }
+  if (url && filePath) {
+    throw new Error("Provide only one of url or file_path");
+  }
+
+  if (url) {
+    const fetched = await getFeishuRuntime().channel.media.fetchRemoteMedia({ url, maxBytes });
+    const urlPath = new URL(url).pathname;
+    const guessed = urlPath.split("/").pop() || "upload.bin";
+    return {
+      buffer: fetched.buffer,
+      fileName: explicitFileName || guessed,
+    };
+  }
+
+  const buffer = await fs.readFile(filePath!);
+  if (buffer.length > maxBytes) {
+    throw new Error(`Local file exceeds limit: ${buffer.length} bytes > ${maxBytes} bytes`);
+  }
+  return {
+    buffer,
+    fileName: explicitFileName || basename(filePath!),
+  };
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any -- SDK block types */
 async function processImages(
   client: Lark.Client,
   docToken: string,
@@ -429,8 +534,11 @@ async function processImages(
   insertedBlocks: any[],
   maxBytes: number,
 ): Promise<number> {
+  /* eslint-enable @typescript-eslint/no-explicit-any */
   const imageUrls = extractImageUrls(markdown);
-  if (imageUrls.length === 0) return 0;
+  if (imageUrls.length === 0) {
+    return 0;
+  }
 
   const imageBlocks = insertedBlocks.filter((b) => b.block_type === 27);
 
@@ -443,7 +551,7 @@ async function processImages(
       const buffer = await downloadImage(url, maxBytes);
       const urlPath = new URL(url).pathname;
       const fileName = urlPath.split("/").pop() || `image_${i}.png`;
-      const fileToken = await uploadImageToDocx(client, blockId, buffer, fileName);
+      const fileToken = await uploadImageToDocx(client, blockId, buffer, fileName, docToken);
 
       await client.docx.documentBlock.patch({
         path: { document_id: docToken, block_id: blockId },
@@ -461,6 +569,140 @@ async function processImages(
   return processed;
 }
 
+async function uploadImageBlock(
+  client: Lark.Client,
+  docToken: string,
+  maxBytes: number,
+  url?: string,
+  filePath?: string,
+  parentBlockId?: string,
+  filename?: string,
+  index?: number,
+  imageInput?: string, // data URI, plain base64, or local path
+) {
+  // Step 1: Create an empty image block (block_type 27).
+  // Per Feishu FAQ: image token cannot be set at block creation time.
+  const insertRes = await client.docx.documentBlockChildren.create({
+    path: { document_id: docToken, block_id: parentBlockId ?? docToken },
+    params: { document_revision_id: -1 },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK type
+    data: { children: [{ block_type: 27, image: {} as any }], index: index ?? -1 },
+  });
+  if (insertRes.code !== 0) {
+    throw new Error(`Failed to create image block: ${insertRes.msg}`);
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK return shape
+  const imageBlockId = insertRes.data?.children?.find((b: any) => b.block_type === 27)?.block_id;
+  if (!imageBlockId) {
+    throw new Error("Failed to create image block");
+  }
+
+  // Step 2: Resolve and upload the image buffer.
+  const upload = await resolveUploadInput(url, filePath, maxBytes, filename, imageInput);
+  const fileToken = await uploadImageToDocx(
+    client,
+    imageBlockId,
+    upload.buffer,
+    upload.fileName,
+    docToken, // drive_route_token for multi-datacenter routing
+  );
+
+  // Step 3: Set the image token on the block.
+  const patchRes = await client.docx.documentBlock.patch({
+    path: { document_id: docToken, block_id: imageBlockId },
+    data: { replace_image: { token: fileToken } },
+  });
+  if (patchRes.code !== 0) {
+    throw new Error(patchRes.msg);
+  }
+
+  return {
+    success: true,
+    block_id: imageBlockId,
+    file_token: fileToken,
+    file_name: upload.fileName,
+    size: upload.buffer.length,
+  };
+}
+
+async function uploadFileBlock(
+  client: Lark.Client,
+  docToken: string,
+  maxBytes: number,
+  url?: string,
+  filePath?: string,
+  parentBlockId?: string,
+  filename?: string,
+) {
+  const blockId = parentBlockId ?? docToken;
+
+  // Feishu API does not allow creating empty file blocks (block_type 23).
+  // Workaround: create a placeholder text block, then replace it with file content.
+  // Actually, file blocks need a different approach: use markdown link as placeholder.
+  const upload = await resolveUploadInput(url, filePath, maxBytes, filename);
+
+  // Create a placeholder text block first
+  const placeholderMd = `[${upload.fileName}](https://example.com/placeholder)`;
+  const converted = await convertMarkdown(client, placeholderMd);
+  const sorted = sortBlocksByFirstLevel(converted.blocks, converted.firstLevelBlockIds);
+  const { children: inserted } = await insertBlocks(client, docToken, sorted, blockId);
+
+  // Get the first inserted block - we'll delete it and create the file in its place
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK return shape
+  const placeholderBlock = inserted[0];
+  if (!placeholderBlock?.block_id) {
+    throw new Error("Failed to create placeholder block for file upload");
+  }
+
+  // Delete the placeholder
+  const parentId = placeholderBlock.parent_id ?? blockId;
+  const childrenRes = await client.docx.documentBlockChildren.get({
+    path: { document_id: docToken, block_id: parentId },
+  });
+  if (childrenRes.code !== 0) {
+    throw new Error(childrenRes.msg);
+  }
+  const items = childrenRes.data?.items ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block type
+  const placeholderIdx = items.findIndex(
+    (item: any) => item.block_id === placeholderBlock.block_id,
+  );
+  if (placeholderIdx >= 0) {
+    const deleteRes = await client.docx.documentBlockChildren.batchDelete({
+      path: { document_id: docToken, block_id: parentId },
+      data: { start_index: placeholderIdx, end_index: placeholderIdx + 1 },
+    });
+    if (deleteRes.code !== 0) {
+      throw new Error(deleteRes.msg);
+    }
+  }
+
+  // Upload file to Feishu drive
+  const fileRes = await client.drive.media.uploadAll({
+    data: {
+      file_name: upload.fileName,
+      parent_type: "docx_file",
+      parent_node: docToken,
+      size: upload.buffer.length,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK file type
+      file: upload.buffer as any,
+    },
+  });
+
+  const fileToken = fileRes?.file_token;
+  if (!fileToken) {
+    throw new Error("File upload failed: no file_token returned");
+  }
+
+  return {
+    success: true,
+    file_token: fileToken,
+    file_name: upload.fileName,
+    size: upload.buffer.length,
+    note: "File uploaded to drive. Use the file_token to reference it. Direct file block creation is not supported by the Feishu API.",
+  };
+}
+
 // ============ Actions ============
 
 const STRUCTURED_BLOCK_TYPES = new Set([14, 18, 21, 23, 27, 30, 31, 32]);
@@ -472,7 +714,9 @@ async function readDoc(client: Lark.Client, docToken: string) {
     client.docx.documentBlock.list({ path: { document_id: docToken } }),
   ]);
 
-  if (contentRes.code !== 0) throw new Error(contentRes.msg);
+  if (contentRes.code !== 0) {
+    throw new Error(contentRes.msg);
+  }
 
   const blocks = blocksRes.data?.items ?? [];
   const blockCounts: Record<string, number> = {};
@@ -503,169 +747,374 @@ async function readDoc(client: Lark.Client, docToken: string) {
   };
 }
 
-async function createDoc(client: Lark.Client, title: string, folderToken?: string) {
+async function createDoc(
+  client: Lark.Client,
+  title: string,
+  folderToken?: string,
+  options?: { grantToRequester?: boolean; requesterOpenId?: string },
+) {
   const res = await client.docx.document.create({
     data: { title, folder_token: folderToken },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
   const doc = res.data?.document;
+  const docToken = doc?.document_id;
+  if (!docToken) {
+    throw new Error("Document creation succeeded but no document_id was returned");
+  }
+  const shouldGrantToRequester = options?.grantToRequester !== false;
+  const requesterOpenId = options?.requesterOpenId?.trim();
+  const requesterPermType: "edit" = "edit";
+
+  let requesterPermissionAdded = false;
+  let requesterPermissionSkippedReason: string | undefined;
+  let requesterPermissionError: string | undefined;
+
+  if (shouldGrantToRequester) {
+    if (!requesterOpenId) {
+      requesterPermissionSkippedReason = "trusted requester identity unavailable";
+    } else {
+      try {
+        await client.drive.permissionMember.create({
+          path: { token: docToken },
+          params: { type: "docx", need_notification: false },
+          data: {
+            member_type: "openid",
+            member_id: requesterOpenId,
+            perm: requesterPermType,
+          },
+        });
+        requesterPermissionAdded = true;
+      } catch (err) {
+        requesterPermissionError = err instanceof Error ? err.message : String(err);
+      }
+    }
+  }
+
   return {
-    document_id: doc?.document_id,
+    document_id: docToken,
     title: doc?.title,
-    url: `https://feishu.cn/docx/${doc?.document_id}`,
+    url: `https://feishu.cn/docx/${docToken}`,
+    ...(shouldGrantToRequester && {
+      requester_permission_added: requesterPermissionAdded,
+      ...(requesterOpenId && { requester_open_id: requesterOpenId }),
+      requester_perm_type: requesterPermType,
+      ...(requesterPermissionSkippedReason && {
+        requester_permission_skipped_reason: requesterPermissionSkippedReason,
+      }),
+      ...(requesterPermissionError && { requester_permission_error: requesterPermissionError }),
+    }),
   };
 }
 
-// Maximum content length for a single API call (empirical value based on Feishu API limits)
-const MAX_CONTENT_LENGTH = 50000; // ~50KB
-const MAX_BLOCKS_PER_INSERT = 50; // Maximum blocks per insert API call
-
-export async function writeDoc(
+async function writeDoc(
   client: Lark.Client,
   docToken: string,
   markdown: string,
   maxBytes: number,
+  logger?: Logger,
 ) {
   const deleted = await clearDocumentContent(client, docToken);
-
-  // Check content length and warn if too long
-  if (markdown.length > MAX_CONTENT_LENGTH) {
-    console.warn(`[feishu_doc] Content length (${markdown.length}) exceeds recommended limit (${MAX_CONTENT_LENGTH}). May cause API errors.`);
-  }
-
-  const { blocks, firstLevelBlockIds } = await convertMarkdown(client, markdown);
+  logger?.info?.("feishu_doc: Converting markdown...");
+  const { blocks, firstLevelBlockIds } = await chunkedConvertMarkdown(client, markdown);
   if (blocks.length === 0) {
     return { success: true, blocks_deleted: deleted, blocks_added: 0, images_processed: 0 };
   }
 
-  // Reorder blocks according to firstLevelBlockIds to maintain correct document order.
-  // The convertMarkdown API returns blocks in an unordered map; firstLevelBlockIds
-  // provides the correct top-level ordering.
-  const orderedBlocks = reorderBlocks(blocks, firstLevelBlockIds);
-  const blockMap = buildBlockMap(blocks);
-
-  // Insert blocks while preserving table content when possible.
-  const { children: inserted, skipped, warnings } = await insertBlocksPreservingTables(
-    client,
-    docToken,
-    orderedBlocks,
-    blockMap,
-  );
+  logger?.info?.(`feishu_doc: Converted to ${blocks.length} blocks, inserting...`);
+  const sortedBlocks = sortBlocksByFirstLevel(blocks, firstLevelBlockIds);
+  const { children: inserted } =
+    blocks.length > BATCH_SIZE
+      ? await insertBlocksInBatches(client, docToken, sortedBlocks, firstLevelBlockIds, logger)
+      : await insertBlocksWithDescendant(client, docToken, sortedBlocks, firstLevelBlockIds);
   const imagesProcessed = await processImages(client, docToken, markdown, inserted, maxBytes);
-
-  const warningParts: string[] = [];
-  if (skipped.length > 0) {
-    warningParts.push(`Skipped unsupported block types: ${skipped.join(", ")}.`);
-  }
-  if (warnings.length > 0) {
-    warningParts.push(...warnings);
-  }
+  logger?.info?.(`feishu_doc: Done (${blocks.length} blocks, ${imagesProcessed} images)`);
 
   return {
     success: true,
     blocks_deleted: deleted,
-    blocks_added: inserted.length,
+    blocks_added: blocks.length,
     images_processed: imagesProcessed,
-    ...(warningParts.length > 0 && {
-      warning: warningParts.join(" "),
-    }),
   };
 }
 
-/**
- * Insert blocks in batches to avoid API limits
- */
-async function insertBlocksInBatches(
+async function appendDoc(
   client: Lark.Client,
   docToken: string,
-  blocks: any[],
-  parentBlockId?: string,
-): Promise<{ children: any[]; skipped: string[] }> {
-  const allInserted: any[] = [];
-  const allSkipped: string[] = [];
-  const blockId = parentBlockId ?? docToken;
-
-  // Process blocks in batches
-  for (let i = 0; i < blocks.length; i += MAX_BLOCKS_PER_INSERT) {
-    const batch = blocks.slice(i, i + MAX_BLOCKS_PER_INSERT);
-    const { cleaned, skipped } = cleanBlocksForInsert(batch);
-    
-    allSkipped.push(...skipped);
-
-    if (cleaned.length === 0) {
-      continue;
-    }
-
-    try {
-      const res = await createChildrenWithRetry(client, {
-        path: { document_id: docToken, block_id: blockId },
-        data: { children: cleaned },
-      });
-      
-      if (res.code !== 0) {
-        // If batch insert fails, try inserting one by one
-        console.warn(`[feishu_doc] Batch insert failed: ${res.msg}. Trying individual inserts...`);
-        for (const block of cleaned) {
-          try {
-            const singleRes = await createChildrenWithRetry(client, {
-              path: { document_id: docToken, block_id: blockId },
-              data: { children: [block] },
-            });
-            if (singleRes.code === 0) {
-              allInserted.push(...(singleRes.data?.children ?? []));
-            } else {
-              console.error(`[feishu_doc] Failed to insert block: ${singleRes.msg}`);
-            }
-          } catch (err) {
-            console.error(`[feishu_doc] Error inserting block:`, err);
-          }
-        }
-      } else {
-        allInserted.push(...(res.data?.children ?? []));
-      }
-    } catch (err) {
-      console.error(`[feishu_doc] Error in batch insert:`, err);
-      throw err;
-    }
-  }
-
-  return { children: allInserted, skipped: [...new Set(allSkipped)] };
-}
-
-async function appendDoc(client: Lark.Client, docToken: string, markdown: string, maxBytes: number) {
-  const { blocks, firstLevelBlockIds } = await convertMarkdown(client, markdown);
+  markdown: string,
+  maxBytes: number,
+  logger?: Logger,
+) {
+  logger?.info?.("feishu_doc: Converting markdown...");
+  const { blocks, firstLevelBlockIds } = await chunkedConvertMarkdown(client, markdown);
   if (blocks.length === 0) {
     throw new Error("Content is empty");
   }
 
-  // Reorder blocks according to firstLevelBlockIds (same fix as writeDoc)
-  const orderedBlocks = reorderBlocks(blocks, firstLevelBlockIds);
-
-  const blockMap = buildBlockMap(blocks);
-  const { children: inserted, skipped, warnings } = await insertBlocksPreservingTables(
-    client,
-    docToken,
-    orderedBlocks,
-    blockMap,
-  );
+  logger?.info?.(`feishu_doc: Converted to ${blocks.length} blocks, inserting...`);
+  const sortedBlocks = sortBlocksByFirstLevel(blocks, firstLevelBlockIds);
+  const { children: inserted } =
+    blocks.length > BATCH_SIZE
+      ? await insertBlocksInBatches(client, docToken, sortedBlocks, firstLevelBlockIds, logger)
+      : await insertBlocksWithDescendant(client, docToken, sortedBlocks, firstLevelBlockIds);
   const imagesProcessed = await processImages(client, docToken, markdown, inserted, maxBytes);
+  logger?.info?.(`feishu_doc: Done (${blocks.length} blocks, ${imagesProcessed} images)`);
 
-  const warningParts: string[] = [];
-  if (skipped.length > 0) {
-    warningParts.push(`Skipped unsupported block types: ${skipped.join(", ")}.`);
+  return {
+    success: true,
+    blocks_added: blocks.length,
+    images_processed: imagesProcessed,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block type
+    block_ids: inserted.map((b: any) => b.block_id),
+  };
+}
+
+async function insertDoc(
+  client: Lark.Client,
+  docToken: string,
+  markdown: string,
+  afterBlockId: string,
+  maxBytes: number,
+  logger?: Logger,
+) {
+  const blockInfo = await client.docx.documentBlock.get({
+    path: { document_id: docToken, block_id: afterBlockId },
+  });
+  if (blockInfo.code !== 0) throw new Error(blockInfo.msg);
+
+  const parentId = blockInfo.data?.block?.parent_id ?? docToken;
+
+  // Paginate through all children to reliably locate after_block_id.
+  // documentBlockChildren.get returns up to 200 children per page; large
+  // parents require multiple requests.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block type
+  const items: any[] = [];
+  let pageToken: string | undefined;
+  do {
+    const childrenRes = await client.docx.documentBlockChildren.get({
+      path: { document_id: docToken, block_id: parentId },
+      params: pageToken ? { page_token: pageToken } : {},
+    });
+    if (childrenRes.code !== 0) throw new Error(childrenRes.msg);
+    items.push(...(childrenRes.data?.items ?? []));
+    pageToken = childrenRes.data?.page_token ?? undefined;
+  } while (pageToken);
+
+  const blockIndex = items.findIndex((item) => item.block_id === afterBlockId);
+  if (blockIndex === -1) {
+    throw new Error(
+      `after_block_id "${afterBlockId}" was not found among the children of parent block "${parentId}". ` +
+        `Use list_blocks to verify the block ID.`,
+    );
   }
-  if (warnings.length > 0) {
-    warningParts.push(...warnings);
+  const insertIndex = blockIndex + 1;
+
+  logger?.info?.("feishu_doc: Converting markdown...");
+  const { blocks, firstLevelBlockIds } = await chunkedConvertMarkdown(client, markdown);
+  if (blocks.length === 0) throw new Error("Content is empty");
+  const sortedBlocks = sortBlocksByFirstLevel(blocks, firstLevelBlockIds);
+
+  logger?.info?.(
+    `feishu_doc: Converted to ${blocks.length} blocks, inserting at index ${insertIndex}...`,
+  );
+  const { children: inserted } =
+    blocks.length > BATCH_SIZE
+      ? await insertBlocksInBatches(
+          client,
+          docToken,
+          sortedBlocks,
+          firstLevelBlockIds,
+          logger,
+          parentId,
+          insertIndex,
+        )
+      : await insertBlocksWithDescendant(client, docToken, sortedBlocks, firstLevelBlockIds, {
+          parentBlockId: parentId,
+          index: insertIndex,
+        });
+
+  const imagesProcessed = await processImages(client, docToken, markdown, inserted, maxBytes);
+  logger?.info?.(`feishu_doc: Done (${blocks.length} blocks, ${imagesProcessed} images)`);
+
+  return {
+    success: true,
+    blocks_added: blocks.length,
+    images_processed: imagesProcessed,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block type
+    block_ids: inserted.map((b: any) => b.block_id),
+  };
+}
+
+async function createTable(
+  client: Lark.Client,
+  docToken: string,
+  rowSize: number,
+  columnSize: number,
+  parentBlockId?: string,
+  columnWidth?: number[],
+) {
+  if (columnWidth && columnWidth.length !== columnSize) {
+    throw new Error("column_width length must equal column_size");
+  }
+
+  const blockId = parentBlockId ?? docToken;
+  const res = await client.docx.documentBlockChildren.create({
+    path: { document_id: docToken, block_id: blockId },
+    data: {
+      children: [
+        {
+          block_type: 31,
+          table: {
+            property: {
+              row_size: rowSize,
+              column_size: columnSize,
+              ...(columnWidth && columnWidth.length > 0 ? { column_width: columnWidth } : {}),
+            },
+          },
+        },
+      ],
+    },
+  });
+
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK return type
+  const tableBlock = (res.data?.children as any[] | undefined)?.find((b) => b.block_type === 31);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK return shape may vary by version
+  const cells = (tableBlock?.children as any[] | undefined) ?? [];
+
+  return {
+    success: true,
+    table_block_id: tableBlock?.block_id,
+    row_size: rowSize,
+    column_size: columnSize,
+    // row-major cell ids, if API returns them directly
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK return type
+    table_cell_block_ids: cells.map((c: any) => c.block_id).filter(Boolean),
+    raw_children_count: res.data?.children?.length ?? 0,
+  };
+}
+
+async function writeTableCells(
+  client: Lark.Client,
+  docToken: string,
+  tableBlockId: string,
+  values: string[][],
+) {
+  if (!values.length || !values[0]?.length) {
+    throw new Error("values must be a non-empty 2D array");
+  }
+
+  const tableRes = await client.docx.documentBlock.get({
+    path: { document_id: docToken, block_id: tableBlockId },
+  });
+  if (tableRes.code !== 0) {
+    throw new Error(tableRes.msg);
+  }
+
+  const tableBlock = tableRes.data?.block;
+  if (tableBlock?.block_type !== 31) {
+    throw new Error("table_block_id is not a table block");
+  }
+
+  // SDK types are loose here across versions
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block payload
+  const tableData = (tableBlock as any).table;
+  const rows = tableData?.property?.row_size as number | undefined;
+  const cols = tableData?.property?.column_size as number | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block payload
+  const cellIds = (tableData?.cells as any[] | undefined) ?? [];
+
+  if (!rows || !cols || !cellIds.length) {
+    throw new Error(
+      "Table cell IDs unavailable from table block. Use list_blocks/get_block and pass explicit cell block IDs if needed.",
+    );
+  }
+
+  const writeRows = Math.min(values.length, rows);
+  let written = 0;
+
+  for (let r = 0; r < writeRows; r++) {
+    const rowValues = values[r] ?? [];
+    const writeCols = Math.min(rowValues.length, cols);
+
+    for (let c = 0; c < writeCols; c++) {
+      const cellId = cellIds[r * cols + c];
+      if (!cellId) continue;
+
+      // table cell is a container block: clear existing children, then create text child blocks
+      const childrenRes = await client.docx.documentBlockChildren.get({
+        path: { document_id: docToken, block_id: cellId },
+      });
+      if (childrenRes.code !== 0) {
+        throw new Error(childrenRes.msg);
+      }
+
+      const existingChildren = childrenRes.data?.items ?? [];
+      if (existingChildren.length > 0) {
+        const delRes = await client.docx.documentBlockChildren.batchDelete({
+          path: { document_id: docToken, block_id: cellId },
+          data: { start_index: 0, end_index: existingChildren.length },
+        });
+        if (delRes.code !== 0) {
+          throw new Error(delRes.msg);
+        }
+      }
+
+      const text = rowValues[c] ?? "";
+      const converted = await convertMarkdown(client, text);
+      const sorted = sortBlocksByFirstLevel(converted.blocks, converted.firstLevelBlockIds);
+
+      if (sorted.length > 0) {
+        await insertBlocks(client, docToken, sorted, cellId);
+      }
+
+      written++;
+    }
   }
 
   return {
     success: true,
-    blocks_added: inserted.length,
-    images_processed: imagesProcessed,
-    block_ids: inserted.map((b: any) => b.block_id),
-    ...(warningParts.length > 0 && {
-      warning: warningParts.join(" "),
-    }),
+    table_block_id: tableBlockId,
+    cells_written: written,
+    table_size: { rows, cols },
+  };
+}
+
+async function createTableWithValues(
+  client: Lark.Client,
+  docToken: string,
+  rowSize: number,
+  columnSize: number,
+  values: string[][],
+  parentBlockId?: string,
+  columnWidth?: number[],
+) {
+  const created = await createTable(
+    client,
+    docToken,
+    rowSize,
+    columnSize,
+    parentBlockId,
+    columnWidth,
+  );
+
+  const tableBlockId = created.table_block_id;
+  if (!tableBlockId) {
+    throw new Error("create_table succeeded but table_block_id is missing");
+  }
+
+  const written = await writeTableCells(client, docToken, tableBlockId, values);
+  return {
+    success: true,
+    table_block_id: tableBlockId,
+    row_size: rowSize,
+    column_size: columnSize,
+    cells_written: written.cells_written,
   };
 }
 
@@ -678,7 +1127,9 @@ async function updateBlock(
   const blockInfo = await client.docx.documentBlock.get({
     path: { document_id: docToken, block_id: blockId },
   });
-  if (blockInfo.code !== 0) throw new Error(blockInfo.msg);
+  if (blockInfo.code !== 0) {
+    throw new Error(blockInfo.msg);
+  }
 
   const res = await client.docx.documentBlock.patch({
     path: { document_id: docToken, block_id: blockId },
@@ -688,7 +1139,9 @@ async function updateBlock(
       },
     },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return { success: true, block_id: blockId };
 }
@@ -697,24 +1150,33 @@ async function deleteBlock(client: Lark.Client, docToken: string, blockId: strin
   const blockInfo = await client.docx.documentBlock.get({
     path: { document_id: docToken, block_id: blockId },
   });
-  if (blockInfo.code !== 0) throw new Error(blockInfo.msg);
+  if (blockInfo.code !== 0) {
+    throw new Error(blockInfo.msg);
+  }
 
   const parentId = blockInfo.data?.block?.parent_id ?? docToken;
 
   const children = await client.docx.documentBlockChildren.get({
     path: { document_id: docToken, block_id: parentId },
   });
-  if (children.code !== 0) throw new Error(children.msg);
+  if (children.code !== 0) {
+    throw new Error(children.msg);
+  }
 
   const items = children.data?.items ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK block type
   const index = items.findIndex((item: any) => item.block_id === blockId);
-  if (index === -1) throw new Error("Block not found");
+  if (index === -1) {
+    throw new Error("Block not found");
+  }
 
   const res = await client.docx.documentBlockChildren.batchDelete({
     path: { document_id: docToken, block_id: parentId },
     data: { start_index: index, end_index: index + 1 },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return { success: true, deleted_block_id: blockId };
 }
@@ -723,7 +1185,9 @@ async function listBlocks(client: Lark.Client, docToken: string) {
   const res = await client.docx.documentBlock.list({
     path: { document_id: docToken },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     blocks: res.data?.items ?? [],
@@ -734,7 +1198,9 @@ async function getBlock(client: Lark.Client, docToken: string, blockId: string) 
   const res = await client.docx.documentBlock.get({
     path: { document_id: docToken, block_id: blockId },
   });
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   return {
     block: res.data?.block,
@@ -743,7 +1209,9 @@ async function getBlock(client: Lark.Client, docToken: string, blockId: string) 
 
 async function listAppScopes(client: Lark.Client) {
   const res = await client.application.scope.list({});
-  if (res.code !== 0) throw new Error(res.msg);
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
 
   const scopes = res.data?.scopes ?? [];
   const granted = scopes.filter((s) => s.grant_status === 1);
@@ -764,46 +1232,89 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
     return;
   }
 
-  if (!hasFeishuToolEnabledForAnyAccount(api.config)) {
+  // Check if any account is configured
+  const accounts = listEnabledFeishuAccounts(api.config);
+  if (accounts.length === 0) {
     api.logger.debug?.("feishu_doc: No Feishu accounts configured, skipping doc tools");
     return;
   }
 
-  // Registration happens once; account selection happens per execute() call.
-  const docEnabled = hasFeishuToolEnabledForAnyAccount(api.config, "doc");
-  const scopesEnabled = hasFeishuToolEnabledForAnyAccount(api.config, "scopes");
+  // Register if enabled on any account; account routing is resolved per execution.
+  const toolsCfg = resolveAnyEnabledFeishuToolsConfig(accounts);
+
   const registered: string[] = [];
+  type FeishuDocExecuteParams = FeishuDocParams & { accountId?: string };
+
+  const getClient = (params: { accountId?: string } | undefined, defaultAccountId?: string) =>
+    createFeishuToolClient({ api, executeParams: params, defaultAccountId });
+
+  const getMediaMaxBytes = (
+    params: { accountId?: string } | undefined,
+    defaultAccountId?: string,
+  ) =>
+    (resolveFeishuToolAccount({ api, executeParams: params, defaultAccountId }).config
+      ?.mediaMaxMb ?? 30) *
+    1024 *
+    1024;
 
   // Main document tool with action-based dispatch
-  if (docEnabled) {
+  if (toolsCfg.doc) {
     api.registerTool(
-    makeFeishuToolFactory((agentAccountId) => ({
-      name: "feishu_doc",
-      label: "Feishu Doc",
-      description:
-        "Feishu document operations. Actions: read, write, append, create, list_blocks, get_block, update_block, delete_block",
-      parameters: FeishuDocSchema,
-      async execute(_toolCallId, params) {
-        const p = params as FeishuDocParams;
-        const asAccountId = (params as any).asAccountId as string | undefined;
-        try {
-          return await withFeishuToolClient({
-            api,
-            toolName: "feishu_doc",
-            requiredTool: "doc",
-            agentAccountId,
-            asAccountId,
-            run: async ({ client, account }) => {
-              const mediaMaxBytes = (account.config?.mediaMaxMb ?? 30) * 1024 * 1024;
+      (ctx) => {
+        const defaultAccountId = ctx.agentAccountId;
+        const trustedRequesterOpenId =
+          ctx.messageChannel === "feishu" ? ctx.requesterSenderId?.trim() || undefined : undefined;
+        return {
+          name: "feishu_doc",
+          label: "Feishu Doc",
+          description:
+            "Feishu document operations. Actions: read, write, append, insert, create, list_blocks, get_block, update_block, delete_block, create_table, write_table_cells, create_table_with_values, insert_table_row, insert_table_column, delete_table_rows, delete_table_columns, merge_table_cells, upload_image, upload_file, color_text",
+          parameters: FeishuDocSchema,
+          async execute(_toolCallId, params) {
+            const p = params as FeishuDocExecuteParams;
+            try {
+              const client = getClient(p, defaultAccountId);
               switch (p.action) {
                 case "read":
                   return json(await readDoc(client, p.doc_token));
                 case "write":
-                  return json(await writeDoc(client, p.doc_token, p.content, mediaMaxBytes));
+                  return json(
+                    await writeDoc(
+                      client,
+                      p.doc_token,
+                      p.content,
+                      getMediaMaxBytes(p, defaultAccountId),
+                      api.logger,
+                    ),
+                  );
                 case "append":
-                  return json(await appendDoc(client, p.doc_token, p.content, mediaMaxBytes));
+                  return json(
+                    await appendDoc(
+                      client,
+                      p.doc_token,
+                      p.content,
+                      getMediaMaxBytes(p, defaultAccountId),
+                      api.logger,
+                    ),
+                  );
+                case "insert":
+                  return json(
+                    await insertDoc(
+                      client,
+                      p.doc_token,
+                      p.content,
+                      p.after_block_id,
+                      getMediaMaxBytes(p, defaultAccountId),
+                      api.logger,
+                    ),
+                  );
                 case "create":
-                  return json(await createDoc(client, p.title, p.folder_token));
+                  return json(
+                    await createDoc(client, p.title, p.folder_token, {
+                      grantToRequester: p.grant_to_requester,
+                      requesterOpenId: trustedRequesterOpenId,
+                    }),
+                  );
                 case "list_blocks":
                   return json(await listBlocks(client, p.doc_token));
                 case "get_block":
@@ -812,59 +1323,138 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
                   return json(await updateBlock(client, p.doc_token, p.block_id, p.content));
                 case "delete_block":
                   return json(await deleteBlock(client, p.doc_token, p.block_id));
+                case "create_table":
+                  return json(
+                    await createTable(
+                      client,
+                      p.doc_token,
+                      p.row_size,
+                      p.column_size,
+                      p.parent_block_id,
+                      p.column_width,
+                    ),
+                  );
+                case "write_table_cells":
+                  return json(
+                    await writeTableCells(client, p.doc_token, p.table_block_id, p.values),
+                  );
+                case "create_table_with_values":
+                  return json(
+                    await createTableWithValues(
+                      client,
+                      p.doc_token,
+                      p.row_size,
+                      p.column_size,
+                      p.values,
+                      p.parent_block_id,
+                      p.column_width,
+                    ),
+                  );
+                case "upload_image":
+                  return json(
+                    await uploadImageBlock(
+                      client,
+                      p.doc_token,
+                      getMediaMaxBytes(p, defaultAccountId),
+                      p.url,
+                      p.file_path,
+                      p.parent_block_id,
+                      p.filename,
+                      p.index,
+                      p.image, // data URI or plain base64
+                    ),
+                  );
+                case "upload_file":
+                  return json(
+                    await uploadFileBlock(
+                      client,
+                      p.doc_token,
+                      getMediaMaxBytes(p, defaultAccountId),
+                      p.url,
+                      p.file_path,
+                      p.parent_block_id,
+                      p.filename,
+                    ),
+                  );
+                case "color_text":
+                  return json(await updateColorText(client, p.doc_token, p.block_id, p.content));
+                case "insert_table_row":
+                  return json(await insertTableRow(client, p.doc_token, p.block_id, p.row_index));
+                case "insert_table_column":
+                  return json(
+                    await insertTableColumn(client, p.doc_token, p.block_id, p.column_index),
+                  );
+                case "delete_table_rows":
+                  return json(
+                    await deleteTableRows(
+                      client,
+                      p.doc_token,
+                      p.block_id,
+                      p.row_start,
+                      p.row_count,
+                    ),
+                  );
+                case "delete_table_columns":
+                  return json(
+                    await deleteTableColumns(
+                      client,
+                      p.doc_token,
+                      p.block_id,
+                      p.column_start,
+                      p.column_count,
+                    ),
+                  );
+                case "merge_table_cells":
+                  return json(
+                    await mergeTableCells(
+                      client,
+                      p.doc_token,
+                      p.block_id,
+                      p.row_start,
+                      p.row_end,
+                      p.column_start,
+                      p.column_end,
+                    ),
+                  );
                 default:
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- exhaustive check fallback
                   return json({ error: `Unknown action: ${(p as any).action}` });
               }
-            },
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const e = err as Record<string, unknown>;
-          const effAcct = (e && typeof e === "object") ? (e._effectiveAccountId as string | undefined) : undefined;
-          return json({ error: msg, ...(effAcct ? { _effectiveAccountId: effAcct } : {}) });
-        }
+            } catch (err) {
+              return json({ error: err instanceof Error ? err.message : String(err) });
+            }
+          },
+        };
       },
-    })),
-    { name: "feishu_doc" },
-  );
+      { name: "feishu_doc" },
+    );
     registered.push("feishu_doc");
   }
 
   // Keep feishu_app_scopes as independent tool
-  if (scopesEnabled) {
+  if (toolsCfg.scopes) {
     api.registerTool(
-    makeFeishuToolFactory((agentAccountId) => ({
-      name: "feishu_app_scopes",
-      label: "Feishu App Scopes",
-      description:
-        "List current app permissions (scopes). Use to debug permission issues or check available capabilities.",
-      parameters: Type.Object({}),
-      async execute(_toolCallId, params) {
-        const asAccountId = (params as any).asAccountId as string | undefined;
-        try {
-          const result = await withFeishuToolClient({
-            api,
-            toolName: "feishu_app_scopes",
-            requiredTool: "scopes",
-            agentAccountId,
-            asAccountId,
-            run: async ({ client }) => listAppScopes(client),
-          });
-          return json(result);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const e = err as Record<string, unknown>;
-          const effAcct = (e && typeof e === "object") ? (e._effectiveAccountId as string | undefined) : undefined;
-          return json({ error: msg, ...(effAcct ? { _effectiveAccountId: effAcct } : {}) });
-        }
-      },
-    })),
-    { name: "feishu_app_scopes" },
-  );
+      (ctx) => ({
+        name: "feishu_app_scopes",
+        label: "Feishu App Scopes",
+        description:
+          "List current app permissions (scopes). Use to debug permission issues or check available capabilities.",
+        parameters: Type.Object({}),
+        async execute() {
+          try {
+            const result = await listAppScopes(getClient(undefined, ctx.agentAccountId));
+            return json(result);
+          } catch (err) {
+            return json({ error: err instanceof Error ? err.message : String(err) });
+          }
+        },
+      }),
+      { name: "feishu_app_scopes" },
+    );
     registered.push("feishu_app_scopes");
   }
 
   if (registered.length > 0) {
-    api.logger.debug?.(`feishu_doc: Registered ${registered.join(", ")}`);
+    api.logger.info?.(`feishu_doc: Registered ${registered.join(", ")}`);
   }
 }

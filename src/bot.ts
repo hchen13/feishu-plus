@@ -972,7 +972,7 @@ export async function handleFeishuMessage(params: {
   }
 
   log(
-    `feishu[${account.accountId}]: received message from ${ctx.senderOpenId} in ${ctx.chatId} (${ctx.chatType})`,
+    `feishu[${account.accountId}]: received message from ${ctx.senderOpenId}${senderUserId ? ` (user_id: ${senderUserId})` : ""} in ${ctx.chatId} (${ctx.chatType})`,
   );
 
   // Log mention targets if detected

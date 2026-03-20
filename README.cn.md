@@ -403,9 +403,11 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
 
 这是所有用户的默认状态。想给某个用户或用户组开放更多命令，必须显式配置覆盖他们的组规则。
 
-### Account 级别覆盖
+### 按 Bot 覆盖
 
-`commandControl` 和 `userGroups` 也可以配置在具体的 `channels.feishu.accounts.<accountId>` 下。Account 级别有配置时，会**完整替换**顶层配置，在这个 account 上生效——不是合并，是替换。
+这里的"account"指的是**飞书 bot 账号**（即一个企业自建应用），不是人类用户的飞书账号。每个 bot 对应 `channels.feishu.accounts.<accountId>` 下的一条配置，通常映射到一个 OpenClaw agent。
+
+`commandControl` 和 `userGroups` 可以配置在某个 bot account 下。Bot 级别有配置时，会**完整替换**顶层配置——不是合并，是替换。
 
 ```json
 "channels": {
@@ -507,18 +509,18 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
 
 2. **`commandControl.groups`** — 有序的权限规则列表。每条规则描述"哪些人（members）能用哪些命令（commands 或 except）"。规则从上到下匹配，第一条命中的规则生效。
 
-3. **飞书 account** — 每个飞书应用对应一个 agent。`userGroups` 和 `commandControl` 配置在渠道层，不是 agent 层。命令权限没有"per-agent"的粒度，只有"per-account（即 per 飞书应用）"的粒度。
+3. **飞书 bot 账号** — 每个飞书自建应用（bot）对应一个 OpenClaw agent。这里说的"account"始终是指 **bot 账号**（即飞书自建应用），不是人类用户的飞书账号。`userGroups` 和 `commandControl` 配置在渠道层，不是 agent 层。命令权限没有"per-agent"的粒度，只有"per-bot-account（即 per 飞书应用）"的粒度。
 
 **一条命令的完整判定流程：**
 
 ```
 用户向 agent X 发送 /model
     ↓
-这条消息是通过哪个飞书 account 收到的？
+这条消息是通过哪个飞书 bot 收到的？
     ↓
-这个 account 有自己的 commandControl 吗？
-    ├─ 有 → 用这个 account 的 commandControl
-    │        userGroups 用 account 自己的（没有则继承顶层）
+这个 bot 有自己的 commandControl 吗？
+    ├─ 有 → 用这个 bot 的 commandControl
+    │        userGroups 用 bot 自己的（没有则继承顶层）
     └─ 没有 → 用顶层全局的 commandControl + userGroups
     ↓
 从上到下遍历 groups，找到第一条 members 覆盖该 sender 的规则
@@ -529,13 +531,13 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
 拒绝 → 以私信形式通知 sender；agent 感知不到这条消息
 ```
 
-**Account 级别覆盖的语义：**
+**按 Bot 覆盖的语义：**
 
-Account 配置做的是**完整替换**，不是合并：
-- `accounts.X.commandControl` 有配置 → 顶层 commandControl 对 account X 完全失效
-- `accounts.X.commandControl` 没有配置 → account X 完整继承顶层 commandControl
+Bot 级别配置做的是**完整替换**，不是合并：
+- `accounts.X.commandControl` 有配置 → 顶层 commandControl 对 bot X 完全失效
+- `accounts.X.commandControl` 没有配置 → bot X 完整继承顶层 commandControl
 - `userGroups` 遵循同样的规则，独立判断
-- 因此：如果只配了 `accounts.X.commandControl` 但没配 `accounts.X.userGroups`，account X 的规则里仍然可以用 `@groupName` 引用顶层 `userGroups` 里定义的组
+- 因此：如果只配了 `accounts.X.commandControl` 但没配 `accounts.X.userGroups`，bot X 的规则里仍然可以用 `@groupName` 引用顶层 `userGroups` 里定义的组
 
 **没有任何配置时的默认行为：**
 

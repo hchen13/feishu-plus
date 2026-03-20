@@ -403,9 +403,11 @@ If a sender is not covered by any group rule — or if `commandControl` is not c
 
 This is the default for everyone. To give a user or group access to more commands, add an explicit group rule that covers them.
 
-### Per-account override
+### Per-bot override
 
-`commandControl` and `userGroups` can also be set inside a specific account under `channels.feishu.accounts.<accountId>`. When present, the account-level config **fully replaces** the top-level config for that account — there is no merging of rules.
+"Account" here refers to a **Feishu bot account** (a self-built app), not a human user's Feishu account. Each bot corresponds to one entry under `channels.feishu.accounts.<accountId>` and typically maps to one OpenClaw agent.
+
+`commandControl` and `userGroups` can be set inside a specific bot account. When present, the bot-level config **fully replaces** the top-level config for that bot — there is no merging of rules.
 
 ```json
 "channels": {
@@ -507,17 +509,17 @@ This section explains the command permission system in full, because the layered
 
 2. **`commandControl.groups`** — ordered permission rules. Each rule has `members` (who this applies to) and a command policy (`commands: "*"`, `commands: [...]`, or `except: [...]`). Rules are checked top-to-bottom; the first matching rule wins.
 
-3. **Feishu accounts** — each Feishu app corresponds to one agent. `userGroups` and `commandControl` live at the channel level, not the agent level. There is no per-agent command permission — only per-account (i.e., per-Feishu-app).
+3. **Feishu bot accounts** — each Feishu self-built app (bot) corresponds to one OpenClaw agent. "Account" in this context always means a **bot account**, not a human user account. `userGroups` and `commandControl` live at the channel level, not the agent level. There is no per-agent command permission — only per-bot-account (i.e., per-Feishu-app).
 
 **How a command is evaluated:**
 
 ```
 User sends /model to agent X
     ↓
-Which Feishu account received this message?
+Which Feishu bot account received this message?
     ↓
-Does that account have its own commandControl?
-    ├─ Yes → use the account's commandControl + its userGroups (or inherited global userGroups if account has none)
+Does that bot account have its own commandControl?
+    ├─ Yes → use the bot's commandControl + its userGroups (or inherited global userGroups if bot has none)
     └─ No  → use the top-level commandControl + top-level userGroups
     ↓
 Walk the groups list top-to-bottom. Find the first group whose members match the sender.
@@ -528,13 +530,13 @@ Allowed → message reaches the agent
 Denied  → sender receives a private DM with the blockMessage; agent never sees the message
 ```
 
-**Account-level override semantics:**
+**Per-bot override semantics:**
 
-Account config does a **full replacement**, not a merge:
-- If `accounts.X.commandControl` is set, the top-level `commandControl` is completely ignored for account X
-- If `accounts.X.commandControl` is not set, account X inherits the top-level `commandControl` entirely
-- `userGroups` follow the same rule independently: account-level replaces top-level if set, otherwise inherited
-- Consequence: if you set `accounts.X.commandControl` but not `accounts.X.userGroups`, account X's rules can still reference `@groupName` entries from the top-level `userGroups`
+Bot-level config does a **full replacement**, not a merge:
+- If `accounts.X.commandControl` is set, the top-level `commandControl` is completely ignored for bot X
+- If `accounts.X.commandControl` is not set, bot X inherits the top-level `commandControl` entirely
+- `userGroups` follow the same rule independently: bot-level replaces top-level if set, otherwise inherited
+- Consequence: if you set `accounts.X.commandControl` but not `accounts.X.userGroups`, bot X's rules can still reference `@groupName` entries from the top-level `userGroups`
 
 **Default behavior (no configuration):**
 

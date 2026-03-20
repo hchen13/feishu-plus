@@ -272,7 +272,7 @@ The recommended workspace template is:
 
 - [`docs/summarizer/AGENTS.md`](./docs/summarizer/AGENTS.md)
 
-Copy it into the summarizer agent's workspace directory. No `BOOTSTRAP.md` is needed — the summarizer is a headless extraction endpoint, not a user-facing agent.
+Copy it into the summarizer agent's workspace directory. The summarizer is a headless extraction endpoint, not a user-facing agent.
 
 Guidelines:
 
@@ -563,7 +563,7 @@ If you are an AI agent helping a human operator deploy this plugin, use this ord
 6. Write the smallest working `channels.feishu` block first. Add per-account overrides only after DM and group delivery work.
 7. Add explicit Feishu `accountId` bindings for every agent that will use Feishu tools.
 8. **Configure command control.** Collect user IDs from the Feishu admin panel (each employee's `user_id` is visible under the admin console's member management). Use `user_id` values — not `open_id` — in `userGroups` so one entry per person covers all bots. If you cannot obtain a user's `user_id`, have them send any message to one of the bots and read the `user_id` from the gateway log.
-9. If `milestoneContext` is enabled, create a headless `summarizer` agent with id exactly `summarizer`, and copy [`docs/summarizer/AGENTS.md`](./docs/summarizer/AGENTS.md) into its workspace. No `BOOTSTRAP.md` is needed.
+9. If `milestoneContext` is enabled, create a headless `summarizer` agent with id exactly `summarizer`, and copy [`docs/summarizer/AGENTS.md`](./docs/summarizer/AGENTS.md) into its workspace.
 10. Verify event subscriptions before debugging message flow.
 11. Test at least these cases:
     - DM round-trip

@@ -1197,9 +1197,11 @@ export async function handleFeishuMessage(params: {
     const feishuTo = isGroup ? `chat:${ctx.chatId}` : `user:${ctx.senderOpenId}`;
 
     // Command control: check whether the sender's group permits this slash command.
-    // Gated on shouldComputeCommandAuthorized (same prefix-based detection used by
-    // the downstream CommandAuthorized flow) to avoid the check on non-command messages.
-    if (shouldComputeCommandAuthorized) {
+    // Run unconditionally — checkFeishuCommandControl returns allowed:true for non-command
+    // messages itself, so the gate does not need to be here.
+    // (shouldComputeCommandAuthorized is an SDK heuristic that may return false when no
+    // allowFrom is configured, which would silently bypass this check if used as the gate.)
+    {
       const cmdCheck = checkFeishuCommandControl({
         feishuCfg,
         senderId: ctx.senderOpenId,

@@ -268,16 +268,17 @@ Add a headless agent like this to `openclaw.json`:
 }
 ```
 
-Recommended workspace templates are included in:
+The recommended workspace template is:
 
 - [`docs/summarizer/AGENTS.md`](./docs/summarizer/AGENTS.md)
-- [`docs/summarizer/BOOTSTRAP.md`](./docs/summarizer/BOOTSTRAP.md)
+
+Copy it into the summarizer agent's workspace directory. No `BOOTSTRAP.md` is needed — the summarizer is a headless extraction endpoint, not a user-facing agent.
 
 Guidelines:
 
 - Keep this agent headless. Do not bind it to Feishu or any other chat channel.
 - Keep the workspace contract narrow: JSON extraction only, no personality, no side workflows.
-- The plugin only relies on the output contract in `AGENTS.md`. `BOOTSTRAP.md` is there to keep the workspace safe and predictable if your host expects one.
+- The `AGENTS.md` contract includes strict length limits (20–40 characters per item, never exceeding 60) to ensure milestones stay concise and fit cleanly into later prompts.
 
 ## Reply Delivery And Long Markdown
 
@@ -541,7 +542,7 @@ If you are an AI agent helping a human operator deploy this plugin, use this ord
 6. If the deployment wants streaming cards, grant `cardkit:card:write` before debugging UX.
 7. If the deployment keeps `resolveSenderNames: true`, grant `contact:user.base:readonly`.
 8. Add explicit Feishu `accountId` bindings for every agent that will use Feishu tools.
-9. If `milestoneContext` is enabled, create a headless `summarizer` agent with id exactly `summarizer`, and copy the recommended workspace files from [`docs/summarizer/AGENTS.md`](./docs/summarizer/AGENTS.md) and [`docs/summarizer/BOOTSTRAP.md`](./docs/summarizer/BOOTSTRAP.md).
+9. If `milestoneContext` is enabled, create a headless `summarizer` agent with id exactly `summarizer`, and copy [`docs/summarizer/AGENTS.md`](./docs/summarizer/AGENTS.md) into its workspace. No `BOOTSTRAP.md` is needed.
 10. Verify event subscriptions before debugging message flow.
 11. Test at least these cases:
     - DM round-trip

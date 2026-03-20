@@ -320,7 +320,7 @@ These options matter in real deployments and are worth understanding:
 
 ## Command Control
 
-By default, any user who can reach an agent can also run any slash command. If you need to restrict which commands different users can run, configure `commandControl` under `channels.feishu`.
+By default, all users can only run a small set of safe commands (`/status`, `/new`, `/reset`, `/compact`). To grant access to more commands — or to fine-tune permissions per user group — configure `commandControl` under `channels.feishu`.
 
 ### How it works
 

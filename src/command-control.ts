@@ -127,18 +127,23 @@ export function extractCommandToken(body: string): string | null {
   return token;
 }
 
+// Commands available to everyone by default, even without any commandControl configuration.
+// To grant broader access, define groups explicitly in commandControl.
+const FALLBACK_COMMANDS = ["/status", "/new", "/reset"];
+
 /**
  * Check whether the sender is allowed to execute the command in the given message.
  *
+ * Default behavior (no commandControl configured, or sender matches no group):
+ * only /status, /new, /reset are permitted. All other commands require an
+ * explicit group rule that covers the sender.
+ *
  * Returns { allowed: true } when:
- * - commandControl is not configured
  * - the message is not a slash command
  * - the sender's matched group permits the command
+ * - the command is in FALLBACK_COMMANDS and no group matched (or no config)
  *
- * Returns { allowed: false, blockMessage } when the sender's group denies the command.
- *
- * When no group matches the sender, a built-in safe fallback applies:
- * /status, /new, /reset are always permitted; all other commands are denied.
+ * Returns { allowed: false, blockMessage } otherwise.
  */
 export function checkFeishuCommandControl(params: {
   feishuCfg: { commandControl?: unknown; userGroups?: unknown } | undefined;
@@ -148,14 +153,14 @@ export function checkFeishuCommandControl(params: {
 }): CommandControlResult {
   const { feishuCfg, senderId, senderUserId, commandBody } = params;
 
-  const commandControl = feishuCfg?.commandControl as CommandControlConfig | undefined;
-  if (!commandControl?.groups?.length) {
-    return { allowed: true };
-  }
-
   const command = extractCommandToken(commandBody);
   if (!command) {
     return { allowed: true };
+  }
+
+  const commandControl = feishuCfg?.commandControl as CommandControlConfig | undefined;
+  if (!commandControl?.groups?.length) {
+    return { allowed: FALLBACK_COMMANDS.includes(command) };
   }
 
   const userGroups = (feishuCfg?.userGroups ?? {}) as Record<string, Array<string | number>>;
@@ -174,9 +179,6 @@ export function checkFeishuCommandControl(params: {
   }
 
   // No group matched: apply built-in safe defaults.
-  // These commands are always available even without explicit group configuration,
-  // so that users don't lose basic functionality when commandControl is first deployed.
-  const FALLBACK_COMMANDS = ["/status", "/new", "/reset"];
   return {
     allowed: FALLBACK_COMMANDS.includes(command),
     blockMessage: commandControl.blockMessage,

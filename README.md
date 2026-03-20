@@ -330,7 +330,7 @@ Two fields work together:
 
 When a slash command arrives, the sender is matched against the groups list top-to-bottom. The first matching group's rule applies. If no group matches, a built-in safe fallback applies: `/status`, `/new`, and `/reset` are permitted; all other commands are denied.
 
-If `commandControl` is not configured at all, there is no restriction — existing deployments are unaffected.
+If `commandControl` is not configured, the safe defaults still apply: `/status`, `/new`, and `/reset` are available to all users; everything else is denied until a group rule explicitly permits it.
 
 ### Configuration
 
@@ -393,11 +393,11 @@ Each group rule uses exactly one of:
 
 IDs are normalized the same way as `allowFrom` entries. The `feishu:` prefix is stripped automatically if present.
 
-### Fallback when no group matches
+### Default behavior
 
-If a sender is not covered by any group rule, the fallback allows only `/status`, `/new`, and `/reset` — the minimum needed to interact with the bot. All other commands return the `blockMessage`.
+If a sender is not covered by any group rule — or if `commandControl` is not configured at all — the fallback allows only `/status`, `/new`, and `/reset`. All other commands return the `blockMessage`.
 
-This means you can configure `commandControl` and add groups incrementally, without immediately locking out users who haven't been assigned to a group yet.
+This is the default for everyone. To give a user or group access to more commands, add an explicit group rule that covers them.
 
 ### Block message delivery
 

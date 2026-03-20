@@ -399,6 +399,43 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
 
 这是所有用户的默认状态。想给某个用户或用户组开放更多命令，必须显式配置覆盖他们的组规则。
 
+### Account 级别覆盖
+
+`commandControl` 和 `userGroups` 也可以配置在具体的 `channels.feishu.accounts.<accountId>` 下。Account 级别有配置时，会**完整替换**顶层配置，在这个 account 上生效——不是合并，是替换。
+
+```json
+"channels": {
+  "feishu": {
+    "userGroups": {
+      "admin": ["ou_xxx"]
+    },
+    "commandControl": {
+      "groups": [
+        { "name": "admin", "members": ["@admin"], "commands": "*" },
+        { "name": "default", "members": ["*"], "commands": ["/new", "/help", "/status", "/compact", "/reset"] }
+      ]
+    },
+    "accounts": {
+      "sensitive-agent": {
+        "userGroups": {
+          "admin": ["ou_xxx"]
+        },
+        "commandControl": {
+          "groups": [
+            { "name": "admin", "members": ["@admin"], "commands": "*" },
+            { "name": "default", "members": ["*"], "commands": ["/status"] }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+在这个例子里，`sensitive-agent` 对非管理员只开放 `/status`，其他 agent 仍然走顶层规则（开放四个命令）。
+
+**注意：** 如果某个 account 定义了自己的 `commandControl` 但没有定义自己的 `userGroups`，它仍然继承顶层的 `userGroups`——`@admin` 这样的引用依然能正常解析。如果 account 同时定义了自己的 `userGroups`，顶层的 `userGroups` 对这个 account 就不再可见。
+
 ### 拒绝通知的发送方式
 
 命令被拒时，通知以**私信形式**发给 sender，而不是发到群里，避免在群内暴露用户尝试了受限命令这一信息。
@@ -444,6 +481,56 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
 - 创建文档时，如果希望发起请求的人立刻拿到访问权限，记得传 `owner_open_id`，否则新文档可能只对 bot app 可见
 
 ## 给 AI Agents 的部署说明
+
+### 命令权限模型详解
+
+这一节完整说明命令权限系统的工作方式，因为这套分层设计有一定理解门槛。
+
+**三个独立概念：**
+
+1. **`userGroups`** — 用户组，就是一批飞书 ID 的命名集合。这里不承载任何权限，只是方便引用，避免到处重复写 ID。
+
+2. **`commandControl.groups`** — 有序的权限规则列表。每条规则描述"哪些人（members）能用哪些命令（commands 或 except）"。规则从上到下匹配，第一条命中的规则生效。
+
+3. **飞书 account** — 每个飞书应用对应一个 agent。`userGroups` 和 `commandControl` 配置在渠道层，不是 agent 层。命令权限没有"per-agent"的粒度，只有"per-account（即 per 飞书应用）"的粒度。
+
+**一条命令的完整判定流程：**
+
+```
+用户向 agent X 发送 /model
+    ↓
+这条消息是通过哪个飞书 account 收到的？
+    ↓
+这个 account 有自己的 commandControl 吗？
+    ├─ 有 → 用这个 account 的 commandControl
+    │        userGroups 用 account 自己的（没有则继承顶层）
+    └─ 没有 → 用顶层全局的 commandControl + userGroups
+    ↓
+从上到下遍历 groups，找到第一条 members 覆盖该 sender 的规则
+    ├─ 找到 → 按该规则的命令策略判断
+    └─ 没找到 → 走内置兜底：只允许 /status /new /reset /compact
+    ↓
+通过 → 消息到达 agent
+拒绝 → 以私信形式通知 sender；agent 感知不到这条消息
+```
+
+**Account 级别覆盖的语义：**
+
+Account 配置做的是**完整替换**，不是合并：
+- `accounts.X.commandControl` 有配置 → 顶层 commandControl 对 account X 完全失效
+- `accounts.X.commandControl` 没有配置 → account X 完整继承顶层 commandControl
+- `userGroups` 遵循同样的规则，独立判断
+- 因此：如果只配了 `accounts.X.commandControl` 但没配 `accounts.X.userGroups`，account X 的规则里仍然可以用 `@groupName` 引用顶层 `userGroups` 里定义的组
+
+**没有任何配置时的默认行为：**
+
+即使完全不写 `commandControl`，默认也是**限制性**的：所有用户只能使用 `/status` `/new` `/reset` `/compact`，其他命令需要显式组规则才能放行。这是刻意的设计——先部署，再按需配权限，不会因为漏配而意外开放命令。
+
+**飞书 open_id 的应用隔离：**
+
+同一个人在不同飞书应用下有不同的 `open_id`。如果某个人需要在所有 agent（跨多个飞书应用）上都拥有管理员权限，必须把他在每个应用下的 `open_id` 都加进 `userGroups` 对应的条目里。
+
+---
 
 如果你是帮助人类快速落地这个插件的 AI agent，建议按这个顺序来：
 

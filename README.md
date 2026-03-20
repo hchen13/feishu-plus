@@ -399,6 +399,43 @@ If a sender is not covered by any group rule — or if `commandControl` is not c
 
 This is the default for everyone. To give a user or group access to more commands, add an explicit group rule that covers them.
 
+### Per-account override
+
+`commandControl` and `userGroups` can also be set inside a specific account under `channels.feishu.accounts.<accountId>`. When present, the account-level config **fully replaces** the top-level config for that account — there is no merging of rules.
+
+```json
+"channels": {
+  "feishu": {
+    "userGroups": {
+      "admin": ["ou_xxx"]
+    },
+    "commandControl": {
+      "groups": [
+        { "name": "admin", "members": ["@admin"], "commands": "*" },
+        { "name": "default", "members": ["*"], "commands": ["/new", "/help", "/status", "/compact", "/reset"] }
+      ]
+    },
+    "accounts": {
+      "sensitive-agent": {
+        "userGroups": {
+          "admin": ["ou_xxx"]
+        },
+        "commandControl": {
+          "groups": [
+            { "name": "admin", "members": ["@admin"], "commands": "*" },
+            { "name": "default", "members": ["*"], "commands": ["/status"] }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+In this example, `sensitive-agent` only allows `/status` for non-admins, while all other agents use the top-level rules that allow four commands.
+
+**Important:** if an account defines its own `commandControl` but not its own `userGroups`, it still inherits the top-level `userGroups` — so `@admin` references continue to resolve correctly. If an account defines its own `userGroups`, the top-level `userGroups` are no longer visible to that account.
+
 ### Block message delivery
 
 When a command is blocked, the denial message is sent as a **direct message to the sender**, not posted to the group. This avoids broadcasting that a user attempted a restricted command.
@@ -444,6 +481,55 @@ Usability note:
 - When creating a document, pass the requester's `owner_open_id` if you want the human requester to immediately receive access on the created doc instead of leaving it visible only to the bot app.
 
 ## Notes For AI Agents
+
+### Understanding the command permission model
+
+This section explains the command permission system in full, because the layered design can be non-obvious.
+
+**Three separate concepts:**
+
+1. **`userGroups`** — named sets of Feishu IDs. No permissions here, just names for groups of people. These exist purely so you don't repeat ID lists everywhere.
+
+2. **`commandControl.groups`** — ordered permission rules. Each rule has `members` (who this applies to) and a command policy (`commands: "*"`, `commands: [...]`, or `except: [...]`). Rules are checked top-to-bottom; the first matching rule wins.
+
+3. **Feishu accounts** — each Feishu app corresponds to one agent. `userGroups` and `commandControl` live at the channel level, not the agent level. There is no per-agent command permission — only per-account (i.e., per-Feishu-app).
+
+**How a command is evaluated:**
+
+```
+User sends /model to agent X
+    ↓
+Which Feishu account received this message?
+    ↓
+Does that account have its own commandControl?
+    ├─ Yes → use the account's commandControl + its userGroups (or inherited global userGroups if account has none)
+    └─ No  → use the top-level commandControl + top-level userGroups
+    ↓
+Walk the groups list top-to-bottom. Find the first group whose members match the sender.
+    ├─ Match found → apply that group's command policy
+    └─ No match   → apply built-in fallback: /status /new /reset /compact only
+    ↓
+Allowed → message reaches the agent
+Denied  → sender receives a private DM with the blockMessage; agent never sees the message
+```
+
+**Account-level override semantics:**
+
+Account config does a **full replacement**, not a merge:
+- If `accounts.X.commandControl` is set, the top-level `commandControl` is completely ignored for account X
+- If `accounts.X.commandControl` is not set, account X inherits the top-level `commandControl` entirely
+- `userGroups` follow the same rule independently: account-level replaces top-level if set, otherwise inherited
+- Consequence: if you set `accounts.X.commandControl` but not `accounts.X.userGroups`, account X's rules can still reference `@groupName` entries from the top-level `userGroups`
+
+**Default behavior (no configuration):**
+
+Even with no `commandControl` configured at all, the default is **restrictive**: only `/status`, `/new`, `/reset`, and `/compact` are available to everyone. Any other command requires an explicit group rule. This is by design — deploy first, configure access second, without risk of accidental exposure.
+
+**Feishu open_id scoping:**
+
+A user has a different `open_id` under each Feishu app. If you need someone to be an admin across all agents (which span multiple apps), you must include all of their app-specific `open_id` values in the same `userGroups` entry.
+
+---
 
 If you are an AI agent helping a human operator deploy this plugin, use this order:
 

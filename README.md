@@ -22,6 +22,7 @@ This distribution is **Feishu-only**. Some inherited source files still use `Lar
 | Long-markdown delivery tuned for Feishu-heavy usage | Baseline | Yes |
 | Sheet workflow as a first-class tool surface | No | Yes |
 | Expanded bitable field / record operations | Partial | Yes |
+| Group-based slash command permissions | No | Yes |
 
 ## What Feishu Plus Adds
 
@@ -31,6 +32,7 @@ This distribution is **Feishu-only**. Some inherited source files still use `Lar
 - **Dedicated sheet tooling**. This fork ships a full sheet workflow instead of treating spreadsheets as a side case.
 - **Expanded bitable tooling**. The bitable surface covers metadata, fields, records, and batch deletion in a way that fits real operations.
 - **Retained upstream tooling**. Doc, wiki, drive, chat, app-scope diagnostics, and other bundled Feishu capabilities are still here.
+- **Group-based command control**. Slash command permissions can be restricted per user group. Each group chooses an allowlist, denylist, or full access. Groups are user-defined and can reflect existing org structure.
 
 ## Requirements
 
@@ -310,6 +312,100 @@ These options matter in real deployments and are worth understanding:
 - `group_topic_sender`: one session per `(group + topic + sender)`
 
 `topicSessionMode` still exists for backward compatibility, but `groupSessionScope` is the real knob now.
+
+## Command Control
+
+By default, any user who can reach an agent can also run any slash command. If you need to restrict which commands different users can run, configure `commandControl` under `channels.feishu`.
+
+### How it works
+
+Two fields work together:
+
+- `userGroups` — define named sets of Feishu user or department IDs once, then reference them by name anywhere
+- `commandControl.groups` — ordered rules that map group membership to command permissions
+
+When a slash command arrives, the sender is matched against the groups list top-to-bottom. The first matching group's rule applies. If no group matches, a built-in safe fallback applies: `/status`, `/new`, and `/reset` are permitted; all other commands are denied.
+
+If `commandControl` is not configured at all, there is no restriction — existing deployments are unaffected.
+
+### Configuration
+
+```json
+"channels": {
+  "feishu": {
+    "userGroups": {
+      "admin":  ["ou_admin1", "ou_admin2"],
+      "tech":   ["ou_dept_tech_group_id"],
+      "design": ["ou_dept_design_group_id"]
+    },
+    "commandControl": {
+      "blockMessage": "You don't have permission to use this command.",
+      "groups": [
+        {
+          "name": "admin",
+          "members": ["@admin"],
+          "commands": "*"
+        },
+        {
+          "name": "tech",
+          "members": ["@tech"],
+          "except": ["/dangerous-command"]
+        },
+        {
+          "name": "design",
+          "members": ["@design"],
+          "commands": ["/new", "/reset", "/help", "/status"]
+        },
+        {
+          "name": "default",
+          "members": ["*"],
+          "commands": ["/new", "/help", "/status"]
+        }
+      ]
+    }
+  }
+}
+```
+
+### Group rule modes
+
+Each group rule uses exactly one of:
+
+| Field | Mode | Behavior |
+|-------|------|----------|
+| `commands: "*"` | allow-all | All commands are permitted, including ones added by future plugins |
+| `commands: [...]` | allowlist | Only the listed commands are permitted; new commands are **not** automatically allowed |
+| `except: [...]` | denylist | All commands are permitted except the listed ones; new commands are **automatically allowed** |
+
+`commands` and `except` cannot both be set on the same group — the schema rejects that config at load time.
+
+### Members
+
+`members` accepts:
+
+- `@groupName` — reference a key in `userGroups`; the group is expanded to its ID list at match time
+- `ou_xxx` — a raw Feishu open ID or department ID
+- `"*"` — matches any sender; use as the last entry for a catch-all default rule
+
+IDs are normalized the same way as `allowFrom` entries. The `feishu:` prefix is stripped automatically if present.
+
+### Fallback when no group matches
+
+If a sender is not covered by any group rule, the fallback allows only `/status`, `/new`, and `/reset` — the minimum needed to interact with the bot. All other commands return the `blockMessage`.
+
+This means you can configure `commandControl` and add groups incrementally, without immediately locking out users who haven't been assigned to a group yet.
+
+### Block message delivery
+
+When a command is blocked, the denial message is sent as a **direct message to the sender**, not posted to the group. This avoids broadcasting that a user attempted a restricted command.
+
+### Hot reload
+
+`commandControl` and `userGroups` take effect immediately on save — no gateway restart is needed.
+
+### Open IDs are app-scoped
+
+Feishu `open_id` values are scoped per app, not per person. A user's `open_id` under app A differs from their `open_id` under app B. Make sure the IDs you put in `userGroups` match the Feishu app that your bot accounts use.
 
 ## Tool Surface
 

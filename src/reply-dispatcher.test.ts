@@ -331,6 +331,40 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     expect(sendMessageFeishuMock).not.toHaveBeenCalled();
     expect(sendMarkdownCardFeishuMock).not.toHaveBeenCalled();
   });
+
+  it("suppresses later final replies already covered by an earlier streaming card", async () => {
+    const { options, result } = createDispatcherHarness({
+      runtime: createRuntimeLogger(),
+    });
+
+    await options.onReplyStart?.();
+    result.replyOptions.onPartialReply?.({
+      text: "先看一下当前配置。确认了，agents.defaults.maxConcurrent 已经是 50。改好了，cron.maxConcurrentRuns 设成 50。",
+    });
+    await options.deliver(
+      {
+        text: "先看一下当前配置。确认了，agents.defaults.maxConcurrent 已经是 50。改好了，cron.maxConcurrentRuns 设成 50。",
+      },
+      { kind: "final" },
+    );
+
+    await options.onReplyStart?.();
+    await options.deliver(
+      { text: "确认了，agents.defaults.maxConcurrent 已经是 50。" },
+      { kind: "final" },
+    );
+
+    await options.onReplyStart?.();
+    await options.deliver(
+      { text: "改好了，cron.maxConcurrentRuns 设成 50。" },
+      { kind: "final" },
+    );
+
+    expect(streamingInstances).toHaveLength(1);
+    expect(streamingInstances[0].close).toHaveBeenCalledTimes(1);
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+    expect(sendMarkdownCardFeishuMock).not.toHaveBeenCalled();
+  });
   it("suppresses duplicate final text while still sending media", async () => {
     const options = setupNonStreamingAutoDispatcher();
     await options.deliver({ text: "plain final" }, { kind: "final" });

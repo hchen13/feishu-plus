@@ -17,6 +17,7 @@ import {
   listFeishuAccountIds,
   resolveDefaultFeishuAccountId,
 } from "./accounts.js";
+import { addReactionFeishu, removeReactionFeishu } from "./reactions.js";
 import {
   listFeishuDirectoryPeers,
   listFeishuDirectoryGroups,
@@ -378,6 +379,48 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount> = {
       }),
   },
   outbound: feishuOutbound,
+  actions: {
+    supportsAction: ({ action }) => {
+      return action === "react";
+    },
+    handleAction: async (ctx) => {
+      if (ctx.action === "react") {
+        const messageId = (ctx.params.messageId ?? ctx.params.message_id) as string | undefined;
+        const emoji = (ctx.params.emoji ?? ctx.params.emojiName) as string | undefined;
+        const remove = ctx.params.remove as boolean | undefined;
+
+        if (!messageId) {
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ ok: false, reason: "missing_message_id", hint: "messageId is required for Feishu reactions." }) }],
+          };
+        }
+        if (!emoji && !remove) {
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ ok: false, reason: "missing_emoji", hint: "emoji is required to add a Feishu reaction." }) }],
+          };
+        }
+
+        try {
+          const result = await addReactionFeishu({
+            cfg: ctx.cfg,
+            messageId,
+            emojiType: (emoji ?? "THUMBSUP").toUpperCase(),
+            accountId: ctx.accountId ?? undefined,
+          });
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ ok: true, reactionId: result.reactionId, emoji }) }],
+          };
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: errMsg }) }],
+          };
+        }
+      }
+
+      return null as any;
+    },
+  },
   status: {
     defaultRuntime: createDefaultChannelRuntimeState(DEFAULT_ACCOUNT_ID, { port: null }),
     buildChannelSummary: ({ snapshot }) =>

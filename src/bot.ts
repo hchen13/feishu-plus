@@ -16,6 +16,7 @@ import {
 import { resolveFeishuAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { finalizeFeishuMessageProcessing, tryRecordMessagePersistent } from "./dedup.js";
+import { checkFeishuCommandControl } from "./command-control.js";
 import { maybeCreateDynamicAgent } from "./dynamic-agent.js";
 import { normalizeFeishuExternalKey } from "./external-keys.js";
 import { downloadMessageResourceFeishu } from "./media.js";
@@ -1194,6 +1195,34 @@ export async function handleFeishuMessage(params: {
     // Using a group-scoped From causes the agent to treat different users as the same person.
     const feishuFrom = `feishu:${ctx.senderOpenId}`;
     const feishuTo = isGroup ? `chat:${ctx.chatId}` : `user:${ctx.senderOpenId}`;
+
+    // Command control: check whether the sender's group permits this slash command.
+    // Gated on shouldComputeCommandAuthorized (same prefix-based detection used by
+    // the downstream CommandAuthorized flow) to avoid the check on non-command messages.
+    if (shouldComputeCommandAuthorized) {
+      const cmdCheck = checkFeishuCommandControl({
+        feishuCfg,
+        senderId: ctx.senderOpenId,
+        senderUserId,
+        commandBody: commandProbeBody,
+      });
+      if (!cmdCheck.allowed) {
+        const groupLabel = cmdCheck.matchedGroup ? ` (group: ${cmdCheck.matchedGroup})` : " (no group matched)";
+        log(
+          `feishu[${account.accountId}]: command blocked for ${ctx.senderOpenId}${groupLabel}: ${commandProbeBody.slice(0, 80)}`,
+        );
+        // Send the denial as a DM to the sender, not to the group chat, to avoid
+        // broadcasting that a user attempted a restricted command.
+        await sendMessageFeishu({
+          cfg,
+          to: `user:${ctx.senderOpenId}`,
+          text: cmdCheck.blockMessage ?? "你没有权限使用该命令",
+          accountId: account.accountId,
+        });
+        return;
+      }
+    }
+
     const peerId = isGroup ? (groupSession?.peerId ?? ctx.chatId) : ctx.senderOpenId;
     const parentPeer = isGroup ? (groupSession?.parentPeer ?? null) : null;
     const replyInThread = isGroup ? (groupSession?.replyInThread ?? false) : false;

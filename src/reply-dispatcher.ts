@@ -154,11 +154,22 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   let reasoningEventCount = 0;
   let reasoningCollapsed = false;
   const deliveredFinalTexts = new Set<string>();
+  const deliveredStreamingTexts: string[] = [];
   let partialUpdateQueue: Promise<void> = Promise.resolve();
   let streamingStartPromise: Promise<void> | null = null;
   let finalReplyMessageId: string | null = null;
   let finalReplyRecorded = false;
+  let replyCycleActive = false;
   type StreamTextUpdateMode = "snapshot" | "delta";
+
+  const normalizeDeliveredText = (text: string) => text.replace(/\s+/g, " ").trim();
+
+  const resetReplyCycleState = () => {
+    deliveredFinalTexts.clear();
+    deliveredStreamingTexts.length = 0;
+    finalReplyMessageId = null;
+    finalReplyRecorded = false;
+  };
 
   const recordAgentReplyToMilestone = async (text: string) => {
     if (!isGroupChat || finalReplyRecorded || !text.trim()) {
@@ -286,7 +297,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     await Promise.resolve();
     await partialUpdateQueue;
     if (streaming?.isActive()) {
-      let text = streamText;
+      const rawText = streamText;
+      const normalizedRawText = normalizeDeliveredText(rawText);
+      if (normalizedRawText) {
+        deliveredStreamingTexts.push(normalizedRawText);
+      }
+      let text = rawText;
       if (mentionTargets?.length) {
         text = buildMentionedCardContent(mentionTargets, text);
       }
@@ -346,10 +362,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
       humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, agentId),
       onReplyStart: () => {
-        deliveredFinalTexts.clear();
-        finalReplyMessageId = null;
-        finalReplyRecorded = false;
-        if (streamingEnabled && renderMode === "card") {
+        if (!replyCycleActive) {
+          resetReplyCycleState();
+          replyCycleActive = true;
+        }
+        if (streamingEnabled && renderMode === "card" && deliveredStreamingTexts.length === 0) {
           startStreaming();
         }
         void typingCallbacks.onReplyStart?.();
@@ -364,8 +381,15 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
               : [];
         const hasText = Boolean(text.trim());
         const hasMedia = mediaList.length > 0;
+        const normalizedText = hasText ? normalizeDeliveredText(text) : "";
+        const coveredByStreamingReply =
+          info?.kind === "final" &&
+          hasText &&
+          deliveredStreamingTexts.some((deliveredText) => deliveredText.includes(normalizedText));
         const skipTextForDuplicateFinal =
-          info?.kind === "final" && hasText && deliveredFinalTexts.has(text);
+          info?.kind === "final" &&
+          hasText &&
+          (deliveredFinalTexts.has(text) || coveredByStreamingReply);
         const shouldDeliverText = hasText && !skipTextForDuplicateFinal;
 
         if (!shouldDeliverText && !hasMedia) {
@@ -458,6 +482,8 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         typingCallbacks.onIdle?.();
       },
       onCleanup: () => {
+        replyCycleActive = false;
+        resetReplyCycleState();
         typingCallbacks.onCleanup?.();
       },
     });

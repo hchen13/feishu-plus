@@ -158,6 +158,26 @@ export const FeishuGroupSchema = z
   })
   .strict();
 
+const CommandControlGroupSchema = z
+  .object({
+    name: z.string(),
+    members: z.array(z.union([z.string(), z.number()])),
+    commands: z.union([z.literal("*"), z.array(z.string())]).optional(),
+    except: z.array(z.string()).optional(),
+  })
+  .strict()
+  .refine((g) => !(g.commands !== undefined && g.except !== undefined), {
+    message: "A command control group cannot have both 'commands' and 'except'",
+  });
+
+const CommandControlSchema = z
+  .object({
+    blockMessage: z.string().optional(),
+    groups: z.array(CommandControlGroupSchema).optional(),
+  })
+  .strict()
+  .optional();
+
 const FeishuSharedConfigShape = {
   webhookHost: z.string().optional(),
   webhookPort: z.number().int().positive().optional(),
@@ -187,6 +207,8 @@ const FeishuSharedConfigShape = {
   reactionNotifications: ReactionNotificationModeSchema,
   typingIndicator: z.boolean().optional(),
   resolveSenderNames: z.boolean().optional(),
+  userGroups: z.record(z.string(), z.array(z.union([z.string(), z.number()]))).optional(),
+  commandControl: CommandControlSchema,
 };
 
 /**

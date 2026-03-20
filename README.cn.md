@@ -94,7 +94,7 @@ openclaw plugins install github:hchen13/feishu-plus
         "enabled": false
       },
       "accounts": {
-        "xinge": {
+        "assistant": {
           "enabled": true,
           "appId": "cli_xxxxx",
           "appSecret": "xxxx",
@@ -121,17 +121,17 @@ openclaw plugins install github:hchen13/feishu-plus
 {
   "bindings": [
     {
-      "agentId": "xinge",
+      "agentId": "assistant",
       "match": {
         "channel": "feishu",
-        "accountId": "xinge"
+        "accountId": "assistant"
       }
     },
     {
-      "agentId": "laok",
+      "agentId": "advisor",
       "match": {
         "channel": "feishu",
-        "accountId": "laok"
+        "accountId": "advisor"
       }
     }
   ]

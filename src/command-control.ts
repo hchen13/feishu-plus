@@ -4,8 +4,8 @@
  * Config shape (under channels.feishu):
  *
  *   userGroups:
- *     admin: ["ou_xxx", "ou_yyy"]
- *     tech:  ["ou_dept_tech"]
+ *     admin: ["user_id_1", "user_id_2"]
+ *     tech:  ["user_id_a", "user_id_b"]
  *
  *   commandControl:
  *     blockMessage: "你没有权限使用该命令"
@@ -22,8 +22,8 @@
  *
  * Matching rules:
  * - groups are evaluated top-to-bottom; first match wins
- * - members supports @groupName references, raw ou_xxx IDs, and "*" wildcard
- * - if no commandControl is configured, all commands are allowed (backward compatible)
+ * - members supports @groupName references, user_id, raw ou_xxx open_id, and "*" wildcard
+ * - if no commandControl is configured, only FALLBACK_COMMANDS are allowed
  * - if sender matches no group, a built-in safe default applies:
  *   only /status, /new, /reset are permitted
  * - commands and except are mutually exclusive on a single group rule

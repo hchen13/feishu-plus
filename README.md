@@ -339,9 +339,9 @@ If `commandControl` is not configured, the safe defaults still apply: `/status`,
 "channels": {
   "feishu": {
     "userGroups": {
-      "admin":  ["ou_admin1", "ou_admin2"],
-      "tech":   ["ou_dept_tech_group_id"],
-      "design": ["ou_dept_design_group_id"]
+      "admin":  ["admin_user_id_1", "admin_user_id_2"],
+      "tech":   ["user_id_a", "user_id_b", "user_id_c"],
+      "design": ["user_id_x", "user_id_y"]
     },
     "commandControl": {
       "blockMessage": "You don't have permission to use this command.",
@@ -389,8 +389,11 @@ Each group rule uses exactly one of:
 `members` accepts:
 
 - `@groupName` — reference a key in `userGroups`; the group is expanded to its ID list at match time
-- `ou_xxx` — a raw Feishu open ID or department ID
+- A Feishu `user_id` (tenant-scoped, consistent across all apps) — **recommended**
+- `ou_xxx` — a raw Feishu `open_id` (app-scoped, different per Feishu app) — avoid if possible
 - `"*"` — matches any sender; use as the last entry for a catch-all default rule
+
+**Always prefer `user_id` over `open_id`.** A person's `user_id` is the same across all Feishu apps in the same tenant, so one entry per person is enough. An `open_id` is different for each Feishu app — you would need N entries per person for N bots. See [Feishu app permissions](#feishu-app-permissions-for-command-control) for how to enable `user_id` resolution.
 
 IDs are normalized the same way as `allowFrom` entries. The `feishu:` prefix is stripped automatically if present.
 
@@ -408,7 +411,7 @@ This is the default for everyone. To give a user or group access to more command
 "channels": {
   "feishu": {
     "userGroups": {
-      "admin": ["ou_xxx"]
+      "admin": ["admin_user_id"]
     },
     "commandControl": {
       "groups": [
@@ -419,7 +422,7 @@ This is the default for everyone. To give a user or group access to more command
     "accounts": {
       "sensitive-agent": {
         "userGroups": {
-          "admin": ["ou_xxx"]
+          "admin": ["admin_user_id"]
         },
         "commandControl": {
           "groups": [
@@ -445,9 +448,20 @@ When a command is blocked, the denial message is sent as a **direct message to t
 
 `commandControl` and `userGroups` take effect immediately on save — no gateway restart is needed.
 
-### Open IDs are app-scoped
+### Feishu app permissions for command control
 
-Feishu `open_id` values are scoped per app, not per person. A user's `open_id` under app A differs from their `open_id` under app B. Make sure the IDs you put in `userGroups` match the Feishu app that your bot accounts use.
+For `user_id`-based matching to work, each Feishu self-built app (bot) must have these permissions enabled on the [Feishu Open Platform](https://open.feishu.cn/) under **tenant_access_token** (application identity, not user identity):
+
+| Permission | Purpose |
+|---|---|
+| `contact:user.base:readonly` | Read user profile (name resolution) |
+| `contact:user.employee_id:readonly` | Read the user's `user_id` field from the contact API |
+
+After adding permissions, **publish a new app version** on the Feishu Open Platform for them to take effect.
+
+**Why both are needed:** The Feishu webhook event only reliably includes `open_id` (app-scoped). The plugin calls the contact API to look up each sender's `user_id` (tenant-scoped). Without `contact:user.employee_id:readonly`, the API returns `user_id` as empty, and matching falls back to `open_id` only — which means you would need a separate `open_id` entry per person per app.
+
+**Also check:** the app's **contact scope** (通讯录权限范围) must include the users you want to resolve. If it's set too narrowly (e.g., "current department only"), the API won't return data for users outside that scope.
 
 ## Tool Surface
 
@@ -526,9 +540,9 @@ Account config does a **full replacement**, not a merge:
 
 Even with no `commandControl` configured at all, the default is **restrictive**: only `/status`, `/new`, `/reset`, and `/compact` are available to everyone. Any other command requires an explicit group rule. This is by design — deploy first, configure access second, without risk of accidental exposure.
 
-**Feishu open_id scoping:**
+**User ID resolution:**
 
-A user has a different `open_id` under each Feishu app. If you need someone to be an admin across all agents (which span multiple apps), you must include all of their app-specific `open_id` values in the same `userGroups` entry.
+`userGroups` should contain Feishu `user_id` values (tenant-scoped, consistent across all apps), not `open_id` values (app-scoped, different per app). The plugin resolves each sender's `user_id` by calling the Feishu contact API at message time. For this to work, every Feishu app must have `contact:user.employee_id:readonly` and `contact:user.base:readonly` permissions under **tenant_access_token**. If these permissions are missing, the plugin falls back to `open_id` matching only, which requires N entries per person for N bots.
 
 ---
 
@@ -538,10 +552,15 @@ If you are an AI agent helping a human operator deploy this plugin, use this ord
 2. Decide whether the deployment is single-account or multi-account.
 3. Create the Feishu self-built app(s) and collect `appId`, `appSecret`, and transport choice (`websocket` or `webhook`).
 4. If transport is `webhook`, also collect `verificationToken` and `encryptKey`.
-5. Write the smallest working `channels.feishu` block first. Add per-account overrides only after DM and group delivery work.
-6. If the deployment wants streaming cards, grant `cardkit:card:write` before debugging UX.
-7. If the deployment keeps `resolveSenderNames: true`, grant `contact:user.base:readonly`.
-8. Add explicit Feishu `accountId` bindings for every agent that will use Feishu tools.
+5. **Configure Feishu app permissions.** Each self-built app needs these permissions on the Feishu Open Platform (all under **tenant_access_token**, not user_access_token):
+   - `contact:user.base:readonly` — required for sender name resolution
+   - `contact:user.employee_id:readonly` — required for `user_id` resolution (command control matching)
+   - `cardkit:card:write` — required only if the deployment wants streaming cards
+   - After adding permissions, the human (or their Feishu admin) must **publish a new app version** for the permissions to take effect. Guide them to: Feishu Open Platform → app page → Version Management → Create Version → Publish.
+   - Also ensure the app's **contact scope** (通讯录权限范围) covers all users who will interact with the bot. By default it may be too narrow.
+6. Write the smallest working `channels.feishu` block first. Add per-account overrides only after DM and group delivery work.
+7. Add explicit Feishu `accountId` bindings for every agent that will use Feishu tools.
+8. **Configure command control.** Collect user IDs from the Feishu admin panel (each employee's `user_id` is visible under the admin console's member management). Use `user_id` values — not `open_id` — in `userGroups` so one entry per person covers all bots. If you cannot obtain a user's `user_id`, have them send any message to one of the bots and read the `user_id` from the gateway log.
 9. If `milestoneContext` is enabled, create a headless `summarizer` agent with id exactly `summarizer`, and copy [`docs/summarizer/AGENTS.md`](./docs/summarizer/AGENTS.md) into its workspace. No `BOOTSTRAP.md` is needed.
 10. Verify event subscriptions before debugging message flow.
 11. Test at least these cases:
@@ -550,6 +569,7 @@ If you are an AI agent helping a human operator deploy this plugin, use this ord
     - one long markdown reply with headings, lists, and a table
     - one streaming-card reply if `streaming: true`
     - one doc, wiki, drive, bitable, or sheet operation against a resource already shared with the bot
+    - a restricted command (e.g. `/model`) from both an admin and a non-admin user, to verify command control is working
 
 ## Attribution
 

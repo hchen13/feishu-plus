@@ -110,6 +110,7 @@ const PERMISSION_ERROR_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
 type SenderNameResult = {
   name?: string;
+  userId?: string;
   permissionError?: PermissionError;
 };
 
@@ -149,18 +150,20 @@ async function resolveFeishuSenderName(params: {
       params: { user_id_type: userIdType },
     });
 
+    const user = res?.data?.user;
     const name: string | undefined =
-      res?.data?.user?.name ||
-      res?.data?.user?.display_name ||
-      res?.data?.user?.nickname ||
-      res?.data?.user?.en_name;
+      user?.name ||
+      user?.display_name ||
+      user?.nickname ||
+      user?.en_name;
+    const userId: string | undefined =
+      typeof user?.user_id === "string" && user.user_id.trim() ? user.user_id.trim() : undefined;
 
     if (name && typeof name === "string") {
       senderNameCache.set(normalizedSenderId, { name, expireAt: now + SENDER_NAME_TTL_MS });
-      return { name };
     }
 
-    return {};
+    return { name: typeof name === "string" ? name : undefined, userId };
   } catch (err) {
     // Check if this is a permission error
     const permErr = extractPermissionError(err);
@@ -908,7 +911,7 @@ export async function handleFeishuMessage(params: {
   let ctx = parseFeishuMessageEvent(event, botOpenId, botName);
   const isGroup = ctx.chatType === "group";
   const isDirect = !isGroup;
-  const senderUserId = event.sender.sender_id.user_id?.trim() || undefined;
+  let senderUserId = event.sender.sender_id.user_id?.trim() || undefined;
 
   // Handle merge_forward messages: fetch full message via API then expand sub-messages
   if (event.message.message_type === "merge_forward") {
@@ -952,6 +955,8 @@ export async function handleFeishuMessage(params: {
       log,
     });
     if (senderResult.name) ctx = { ...ctx, senderName: senderResult.name };
+    // Supplement user_id from contact API when webhook event didn't provide it
+    if (senderResult.userId && !senderUserId) senderUserId = senderResult.userId;
 
     // Track permission error to inform agent later (with cooldown to avoid repetition)
     if (senderResult.permissionError) {

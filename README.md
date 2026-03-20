@@ -6,7 +6,11 @@ OpenClaw already ships with a bundled Feishu plugin. Use the bundled plugin if y
 
 Our actual deployment needed three things the bundled path did not give us cleanly enough: shared context across multiple agents inside the same group chat, much stronger long-markdown delivery for Feishu, and deeper spreadsheet / bitable workflows. This repository keeps the upstream Feishu foundation, backports newer bundled changes from [`openclaw/openclaw`](https://github.com/openclaw/openclaw), and layers on the production behavior that motivated the fork in the first place.
 
-The most important addition is **GroupSense**: a context-enhancement layer for multi-agent group chats. It lets you `@` one agent and continue a discussion that another agent was already part of, without manually replaying the whole conversation. The plugin achieves that by combining milestone summaries with recent raw group history and injecting both back into later prompts.
+Two additions define this fork:
+
+**GroupSense** is a context-enhancement layer for multi-agent group chats. It lets you `@` one agent and continue a discussion that another agent was already part of, without manually replaying the whole conversation. The plugin achieves that by combining milestone summaries with recent raw group history and injecting both back into later prompts.
+
+**Command Control** is a group-based permission system for slash commands. In multi-user enterprise deployments, not everyone should be able to run every command — `/model` and `/compact` should probably be off-limits for general staff, while admins and power users get full access. Command Control lets you define user groups that map directly to your org structure, assign each group an allowlist, denylist, or full access, and have the rules take effect on save without a gateway restart.
 
 This repository is also derived from [`m1heng/clawdbot-feishu`](https://github.com/m1heng/clawdbot-feishu), which remains part of the project lineage.
 

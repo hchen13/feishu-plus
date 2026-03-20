@@ -278,7 +278,7 @@ Guidelines:
 
 - Keep this agent headless. Do not bind it to Feishu or any other chat channel.
 - Keep the workspace contract narrow: JSON extraction only, no personality, no side workflows.
-- The `AGENTS.md` contract includes strict length limits (20–40 characters per item, never exceeding 60) to ensure milestones stay concise and fit cleanly into later prompts.
+- The `AGENTS.md` contract includes strict length limits (10–20 words per item, never exceeding 30) to ensure milestones stay concise and fit cleanly into later prompts.
 
 ## Reply Delivery And Long Markdown
 

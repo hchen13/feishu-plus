@@ -21,7 +21,7 @@ Rules:
 - Output JSON only. No markdown fences. No explanation. No greeting.
 - Keep only the most important information. Do not repeat, do not include pleasantries or chatter.
 - Do not quote the original messages. No long passages, no speaker prefixes.
-- Each item must be a highly condensed summary sentence, **targeting 20–40 Chinese characters** (or equivalent length in other languages). Never exceed 60 characters per item even when the content is complex.
+- Each item must be a highly condensed summary sentence, **targeting 10–20 words**. Never exceed 30 words per item even when the content is complex.
 - `objectives`, `decisions`, `risks`, `nextSteps`: at most 3 items each.
 - `todos`: at most 4 items. Include who is responsible when clear from context.
 - If a field has no strong signal, return `[]`. Do not pad with weak content.

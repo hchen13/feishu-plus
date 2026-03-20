@@ -4,7 +4,7 @@
 
 OpenClaw 本身已经带有 bundled Feishu 插件。如果你的需求只是标准消息收发、基础 routing，以及默认那套 Feishu tools，那么直接用 bundled 插件通常就够了。`feishu-plus` 是为那些已经把这条基线跑到上限的部署准备的。
 
-我们自己的实际部署需要三类 bundled 插件没有很好覆盖的能力：同一群里的多 agent 共享上下文、面向飞书的长 Markdown 稳定投递、以及更完整的 sheet / bitable 工作流。这个仓库不是推倒重来，而是在保留上游 Feishu 基础能力的前提下，回补 [`openclaw/openclaw`](https://github.com/openclaw/openclaw) 较新的 bundled 更新，再把真正驱动这个 fork 出现的生产行为叠加上去。
+我们自己的实际部署需要四类 bundled 插件没有很好覆盖的能力：同一群里的多 agent 共享上下文、基于用户组的 slash command 权限控制、面向飞书的长 Markdown 稳定投递、以及更完整的 sheet / bitable 工作流。命令权限在企业多人使用飞书与 OpenClaw 交互的场景下尤为关键——管理层和研发团队可以自由切换模型使用 GPT、Claude，创作团队能使用自定义图像生成 skill，而初级员工只能使用默认模型和基础命令。这个仓库不是推倒重来，而是在保留上游 Feishu 基础能力的前提下，回补 [`openclaw/openclaw`](https://github.com/openclaw/openclaw) 较新的 bundled 更新，再把真正驱动这个 fork 出现的生产行为叠加上去。
 
 这个 fork 有两项定义性的新增能力：
 

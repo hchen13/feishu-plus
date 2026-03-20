@@ -4,7 +4,7 @@ English | [中文](./README.cn.md)
 
 OpenClaw already ships with a bundled Feishu plugin. Use the bundled plugin if you only need standard message delivery, baseline routing, and the default Feishu tool surface. `feishu-plus` exists for deployments that outgrew that baseline.
 
-Our actual deployment needed three things the bundled path did not give us cleanly enough: shared context across multiple agents inside the same group chat, much stronger long-markdown delivery for Feishu, and deeper spreadsheet / bitable workflows. This repository keeps the upstream Feishu foundation, backports newer bundled changes from [`openclaw/openclaw`](https://github.com/openclaw/openclaw), and layers on the production behavior that motivated the fork in the first place.
+Our actual deployment needed four things the bundled path did not give us cleanly enough: shared context across multiple agents inside the same group chat, group-based slash command permissions, much stronger long-markdown delivery for Feishu, and deeper spreadsheet / bitable workflows. Command permissions matter especially in enterprise multi-user deployments where different teams need different access levels — management and dev teams may switch models freely, creative teams get access to image-generation skills, while junior staff stays on the default model. This repository keeps the upstream Feishu foundation, backports newer bundled changes from [`openclaw/openclaw`](https://github.com/openclaw/openclaw), and layers on the production behavior that motivated the fork in the first place.
 
 Two additions define this fork:
 

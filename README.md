@@ -328,9 +328,9 @@ Two fields work together:
 - `userGroups` — define named sets of Feishu user or department IDs once, then reference them by name anywhere
 - `commandControl.groups` — ordered rules that map group membership to command permissions
 
-When a slash command arrives, the sender is matched against the groups list top-to-bottom. The first matching group's rule applies. If no group matches, a built-in safe fallback applies: `/status`, `/new`, and `/reset` are permitted; all other commands are denied.
+When a slash command arrives, the sender is matched against the groups list top-to-bottom. The first matching group's rule applies. If no group matches, a built-in safe fallback applies: `/status`, `/new`, `/reset`, and `/compact` are permitted; all other commands are denied.
 
-If `commandControl` is not configured, the safe defaults still apply: `/status`, `/new`, and `/reset` are available to all users; everything else is denied until a group rule explicitly permits it.
+If `commandControl` is not configured, the safe defaults still apply: `/status`, `/new`, `/reset`, and `/compact` are available to all users; everything else is denied until a group rule explicitly permits it.
 
 ### Configuration
 
@@ -395,7 +395,7 @@ IDs are normalized the same way as `allowFrom` entries. The `feishu:` prefix is 
 
 ### Default behavior
 
-If a sender is not covered by any group rule — or if `commandControl` is not configured at all — the fallback allows only `/status`, `/new`, and `/reset`. All other commands return the `blockMessage`.
+If a sender is not covered by any group rule — or if `commandControl` is not configured at all — the fallback allows only `/status`, `/new`, `/reset`, and `/compact`. All other commands return the `blockMessage`.
 
 This is the default for everyone. To give a user or group access to more commands, add an explicit group rule that covers them.
 

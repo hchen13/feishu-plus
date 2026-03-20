@@ -129,7 +129,7 @@ export function extractCommandToken(body: string): string | null {
 
 // Commands available to everyone by default, even without any commandControl configuration.
 // To grant broader access, define groups explicitly in commandControl.
-const FALLBACK_COMMANDS = ["/status", "/new", "/reset"];
+const FALLBACK_COMMANDS = ["/status", "/new", "/reset", "/compact"];
 
 /**
  * Check whether the sender is allowed to execute the command in the given message.

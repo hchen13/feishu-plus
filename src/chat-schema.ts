@@ -19,6 +19,13 @@ export const FeishuChatSchema = Type.Object({
       description: "Member ID type (default: open_id)",
     }),
   ),
+  asAccountId: Type.Optional(
+    Type.String({
+      description:
+        "Execute as a specific Feishu bot account (for agents bound to multiple Feishu apps). " +
+        "Use the account ID from the OpenClaw config (e.g. 'laok', 'laok-gradients').",
+    }),
+  ),
 });
 
 export type FeishuChatParams = Static<typeof FeishuChatSchema>;

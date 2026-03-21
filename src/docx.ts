@@ -6,7 +6,7 @@ import type * as Lark from "@larksuiteoapi/node-sdk";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/feishu";
 import { listEnabledFeishuAccounts } from "./accounts.js";
-import { FeishuDocSchema, type FeishuDocParams } from "./doc-schema.js";
+import { FeishuDocSchemaWithAccount, type FeishuDocParams } from "./doc-schema.js";
 import { BATCH_SIZE, insertBlocksInBatches } from "./docx-batch-insert.js";
 import { updateColorText } from "./docx-color-text.js";
 import {
@@ -1243,7 +1243,7 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
   const toolsCfg = resolveAnyEnabledFeishuToolsConfig(accounts);
 
   const registered: string[] = [];
-  type FeishuDocExecuteParams = FeishuDocParams & { accountId?: string };
+  type FeishuDocExecuteParams = FeishuDocParams;
 
   const getClient = (params: { accountId?: string } | undefined, defaultAccountId?: string) =>
     createFeishuToolClient({ api, executeParams: params, defaultAccountId });
@@ -1269,7 +1269,7 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
           label: "Feishu Doc",
           description:
             "Feishu document operations. Actions: read, write, append, insert, create, list_blocks, get_block, update_block, delete_block, create_table, write_table_cells, create_table_with_values, insert_table_row, insert_table_column, delete_table_rows, delete_table_columns, merge_table_cells, upload_image, upload_file, color_text",
-          parameters: FeishuDocSchema,
+          parameters: FeishuDocSchemaWithAccount,
           async execute(_toolCallId, params) {
             const p = params as FeishuDocExecuteParams;
             try {
@@ -1439,10 +1439,19 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
         label: "Feishu App Scopes",
         description:
           "List current app permissions (scopes). Use to debug permission issues or check available capabilities.",
-        parameters: Type.Object({}),
-        async execute() {
+        parameters: Type.Object({
+          accountId: Type.Optional(
+            Type.String({
+              description:
+                "Feishu bot account ID to query (for agents bound to multiple Feishu apps). " +
+                "Omit to use the default account from the current context.",
+            }),
+          ),
+        }),
+        async execute(_toolCallId: string, params: unknown) {
           try {
-            const result = await listAppScopes(getClient(undefined, ctx.agentAccountId));
+            const p = params as { accountId?: string };
+            const result = await listAppScopes(getClient(p, ctx.agentAccountId));
             return json(result);
           } catch (err) {
             return json({ error: err instanceof Error ? err.message : String(err) });

@@ -7,17 +7,32 @@ vi.mock("./client.js", () => ({
   createFeishuClient: createFeishuClientMock,
 }));
 
+// Mock tool-exec to bypass account resolution in unit tests
+const withFeishuToolClientMock = vi.hoisted(() => vi.fn());
+const hasFeishuToolEnabledMock = vi.hoisted(() => vi.fn().mockReturnValue(true));
+vi.mock("./tools-common/tool-exec.js", () => ({
+  hasFeishuToolEnabledForAnyAccount: hasFeishuToolEnabledMock,
+  makeFeishuToolFactory: (fn: any) => fn(undefined, undefined),
+  withFeishuToolClient: withFeishuToolClientMock,
+}));
+
 describe("registerFeishuChatTools", () => {
   const chatGetMock = vi.hoisted(() => vi.fn());
   const chatMembersGetMock = vi.hoisted(() => vi.fn());
 
   beforeEach(() => {
     vi.clearAllMocks();
-    createFeishuClientMock.mockReturnValue({
+    const mockClient = {
       im: {
         chat: { get: chatGetMock },
         chatMembers: { get: chatMembersGetMock },
       },
+    };
+    createFeishuClientMock.mockReturnValue(mockClient);
+
+    // withFeishuToolClient: invoke the run callback with a mock client
+    withFeishuToolClientMock.mockImplementation(async (params: any) => {
+      return params.run({ client: mockClient, account: { accountId: "test", config: {} } });
     });
   });
 
@@ -69,6 +84,8 @@ describe("registerFeishuChatTools", () => {
   });
 
   it("skips registration when chat tool is disabled", () => {
+    hasFeishuToolEnabledMock.mockReturnValueOnce(false);
+
     const registerTool = vi.fn();
     registerFeishuChatTools({
       config: {

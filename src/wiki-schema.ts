@@ -1,6 +1,15 @@
 import { Type, type Static } from "@sinclair/typebox";
 
-export const FeishuWikiSchema = Type.Union([
+const AccountIdField = Type.Optional(
+  Type.String({
+    description:
+      "Feishu bot account ID to use (for agents bound to multiple Feishu apps across organizations). " +
+      "Matches the account key in OpenClaw config channels.feishu.accounts. " +
+      "Omit to use the default account from the current context.",
+  }),
+);
+
+const FeishuWikiActions = Type.Union([
   Type.Object({
     action: Type.Literal("spaces"),
   }),
@@ -50,6 +59,11 @@ export const FeishuWikiSchema = Type.Union([
     node_token: Type.String({ description: "Node token to rename" }),
     title: Type.String({ description: "New title" }),
   }),
+]);
+
+export const FeishuWikiSchema = Type.Intersect([
+  FeishuWikiActions,
+  Type.Object({ accountId: AccountIdField }),
 ]);
 
 export type FeishuWikiParams = Static<typeof FeishuWikiSchema>;

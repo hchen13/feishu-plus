@@ -181,8 +181,6 @@ export function registerFeishuDriveTools(api: OpenClawPluginApi) {
     return;
   }
 
-  type FeishuDriveExecuteParams = FeishuDriveParams & { accountId?: string };
-
   api.registerTool(
     (ctx) => {
       const defaultAccountId = ctx.agentAccountId;
@@ -193,7 +191,7 @@ export function registerFeishuDriveTools(api: OpenClawPluginApi) {
           "Feishu cloud storage operations. Actions: list, info, create_folder, move, delete",
         parameters: FeishuDriveSchema,
         async execute(_toolCallId, params) {
-          const p = params as FeishuDriveExecuteParams;
+          const p = params as FeishuDriveParams;
           try {
             const client = createFeishuToolClient({
               api,

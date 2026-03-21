@@ -1,5 +1,14 @@
 import { Type, type Static } from "@sinclair/typebox";
 
+const AccountIdField = Type.Optional(
+  Type.String({
+    description:
+      "Feishu bot account ID to use (for agents bound to multiple Feishu apps across organizations). " +
+      "Matches the account key in OpenClaw config channels.feishu.accounts. " +
+      "Omit to use the default account from the current context.",
+  }),
+);
+
 const FileType = Type.Union([
   Type.Literal("doc"),
   Type.Literal("docx"),
@@ -11,7 +20,7 @@ const FileType = Type.Union([
   Type.Literal("shortcut"),
 ]);
 
-export const FeishuDriveSchema = Type.Union([
+const FeishuDriveActions = Type.Union([
   Type.Object({
     action: Type.Literal("list"),
     folder_token: Type.Optional(
@@ -41,6 +50,11 @@ export const FeishuDriveSchema = Type.Union([
     file_token: Type.String({ description: "File token to delete" }),
     type: FileType,
   }),
+]);
+
+export const FeishuDriveSchema = Type.Intersect([
+  FeishuDriveActions,
+  Type.Object({ accountId: AccountIdField }),
 ]);
 
 export type FeishuDriveParams = Static<typeof FeishuDriveSchema>;

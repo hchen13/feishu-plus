@@ -130,8 +130,6 @@ export function registerFeishuPermTools(api: OpenClawPluginApi) {
     return;
   }
 
-  type FeishuPermExecuteParams = FeishuPermParams & { accountId?: string };
-
   api.registerTool(
     (ctx) => {
       const defaultAccountId = ctx.agentAccountId;
@@ -141,7 +139,7 @@ export function registerFeishuPermTools(api: OpenClawPluginApi) {
         description: "Feishu permission management. Actions: list, add, remove",
         parameters: FeishuPermSchema,
         async execute(_toolCallId, params) {
-          const p = params as FeishuPermExecuteParams;
+          const p = params as FeishuPermParams;
           try {
             const client = createFeishuToolClient({
               api,

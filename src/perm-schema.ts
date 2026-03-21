@@ -1,5 +1,14 @@
 import { Type, type Static } from "@sinclair/typebox";
 
+const AccountIdField = Type.Optional(
+  Type.String({
+    description:
+      "Feishu bot account ID to use (for agents bound to multiple Feishu apps across organizations). " +
+      "Matches the account key in OpenClaw config channels.feishu.accounts. " +
+      "Omit to use the default account from the current context.",
+  }),
+);
+
 const TokenType = Type.Union([
   Type.Literal("doc"),
   Type.Literal("docx"),
@@ -26,7 +35,7 @@ const Permission = Type.Union([
   Type.Literal("full_access"),
 ]);
 
-export const FeishuPermSchema = Type.Union([
+const FeishuPermActions = Type.Union([
   Type.Object({
     action: Type.Literal("list"),
     token: Type.String({ description: "File token" }),
@@ -47,6 +56,11 @@ export const FeishuPermSchema = Type.Union([
     member_type: MemberType,
     member_id: Type.String({ description: "Member ID to remove" }),
   }),
+]);
+
+export const FeishuPermSchema = Type.Intersect([
+  FeishuPermActions,
+  Type.Object({ accountId: AccountIdField }),
 ]);
 
 export type FeishuPermParams = Static<typeof FeishuPermSchema>;

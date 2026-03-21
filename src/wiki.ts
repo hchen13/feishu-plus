@@ -169,8 +169,6 @@ export function registerFeishuWikiTools(api: OpenClawPluginApi) {
     return;
   }
 
-  type FeishuWikiExecuteParams = FeishuWikiParams & { accountId?: string };
-
   api.registerTool(
     (ctx) => {
       const defaultAccountId = ctx.agentAccountId;
@@ -181,7 +179,7 @@ export function registerFeishuWikiTools(api: OpenClawPluginApi) {
           "Feishu knowledge base operations. Actions: spaces, nodes, get, create, move, rename",
         parameters: FeishuWikiSchema,
         async execute(_toolCallId, params) {
-          const p = params as FeishuWikiExecuteParams;
+          const p = params as FeishuWikiParams;
           try {
             const client = createFeishuToolClient({
               api,

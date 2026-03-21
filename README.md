@@ -21,6 +21,8 @@ This distribution is **Feishu-only**. Some inherited source files still use `Lar
 | Need | Bundled Feishu | `feishu-plus` |
 | --- | --- | --- |
 | Standard Feishu channel integration | Yes | Yes |
+| Multiple agents, each with its own Feishu app | No (single app) | Yes |
+| One agent serving multiple Feishu orgs | No | Yes |
 | Shared context across multiple agents in one group | No | Yes |
 | Milestone summaries + recent group history injection | No | Yes |
 | Long-markdown delivery tuned for Feishu-heavy usage | Baseline | Yes |
@@ -30,6 +32,7 @@ This distribution is **Feishu-only**. Some inherited source files still use `Lar
 
 ## What Feishu Plus Adds
 
+- **Multi-account architecture**. The bundled Feishu plugin connects a single Feishu app to the entire OpenClaw instance. `feishu-plus` supports two layers of multi-account: (1) each agent can have its own dedicated Feishu app with independent credentials, permissions, and behavior settings; (2) a single agent can be bound to multiple Feishu apps across different organizations, so the same agent serves users in your personal tenant and your corporate tenant simultaneously. Inbound messages route automatically; outbound tool calls use explicit account selection to prevent cross-org misrouting.
 - **GroupSense**. Multi-agent group chats become materially more natural because later prompts can see milestone summaries and recent raw group history, not just the latest `@mention`.
 - **Milestone-aware prompting**. Group discussion windows are periodically summarized and stored under `~/.openclaw/shared-knowledge/feishu-group-milestones`.
 - **Long-form reply delivery**. `textChunkLimit`, card rendering, and Feishu-specific reply behavior are tuned for large markdown outputs.
@@ -115,7 +118,7 @@ Single-account deployments can often stop there. Multi-account deployments shoul
 
 ## Bind Agents To Feishu Accounts
 
-For multi-account setups, bind each agent to exactly one Feishu `accountId` at the OpenClaw level:
+For multi-account setups, bind each agent to its Feishu `accountId`(s) at the OpenClaw level:
 
 ```json
 {
@@ -138,13 +141,30 @@ For multi-account setups, bind each agent to exactly one Feishu `accountId` at t
 }
 ```
 
-Why this matters:
+### Multi-organization binding
 
-- Inbound message routing already knows which Feishu account delivered the event.
-- Tool execution also needs an unambiguous Feishu identity.
-- This plugin will refuse ambiguous tool-account routing instead of silently guessing.
+An agent can be bound to multiple Feishu apps across different organizations. For example, the same agent serving both a personal tenant and a corporate tenant:
 
-If an agent has multiple Feishu bindings, they should still resolve to a single `accountId`. Otherwise the tool layer will raise an explicit routing error.
+```json
+{
+  "bindings": [
+    {
+      "agentId": "assistant",
+      "match": { "channel": "feishu", "accountId": "assistant" }
+    },
+    {
+      "agentId": "assistant",
+      "match": { "channel": "feishu", "accountId": "assistant-corp" }
+    }
+  ]
+}
+```
+
+How multi-binding routing works:
+
+- **Inbound message → reply:** the plugin knows which Feishu app received the message and replies through the same app. Zero ambiguity.
+- **Agent-initiated tool calls:** the agent must pass `accountId` (or `asAccountId` for tools that use it) to specify which Feishu app to use. If the agent omits the parameter and multiple bindings exist, the tool raises an explicit routing error — no silent fallback, no cross-org misrouting.
+- **All Feishu tools** (`feishu_doc`, `feishu_wiki`, `feishu_drive`, `feishu_chat`, `feishu_perm`, `feishu_app_scopes`, bitable, sheet, task) support explicit account selection via their `accountId` or `asAccountId` parameter.
 
 ## Feishu App Setup
 
@@ -490,8 +510,8 @@ Optional sensitive tooling:
 
 Operational note:
 
-- Tool execution resolves the effective Feishu identity from inbound context or agent/account bindings.
-- Do not leave agent-to-account mapping ambiguous in a multi-account deployment.
+- Tool execution resolves the effective Feishu identity from inbound message context first, then from agent/account bindings.
+- Agents bound to multiple Feishu apps (cross-organization) must specify `accountId` or `asAccountId` when initiating tool calls outside of a message-reply context (e.g., cron jobs, heartbeats). The plugin will not guess — ambiguous routing is an explicit error.
 
 Usability note:
 

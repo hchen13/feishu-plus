@@ -56,11 +56,15 @@ export function hasFeishuToolEnabledForAnyAccount(
  * @param cfg - OpenClaw config
  * @param agentAccountId - from FeishuToolFactoryContext.agentAccountId (factory path)
  * @param agentId - from FeishuToolFactoryContext.agentId (used for level-3 bindings fallback)
+ * @param preferredAccountId - when multiple bindings exist, prefer this accountId if it matches
+ *   one of them (used by asAccountId delegation to avoid AMBIGUOUS errors). No fallback — if the
+ *   preferred ID doesn't match any binding, the ambiguous error is still thrown.
  */
 export function resolveToolAccount(
   cfg: ClawdbotConfig,
   agentAccountId?: string,
   agentId?: string,
+  preferredAccountId?: string,
 ): ResolvedFeishuAccount {
   const context = getCurrentFeishuToolContext();
 
@@ -97,11 +101,20 @@ export function resolveToolAccount(
     }
 
     if (uniqueAccountIds.length > 1) {
+      // When a preferred account is specified (from asAccountId) and it matches one of the
+      // agent's bindings, use it directly. This supports agents bound to multiple Feishu apps
+      // (e.g., across different organizations) without fallback — the caller explicitly chose.
+      if (preferredAccountId && uniqueAccountIds.includes(preferredAccountId)) {
+        console.log(
+          `[feishu:routing] level=3 (bindings-preferred) agentId="${agentId}" → ` +
+          `accountId="${preferredAccountId}" (preferred, from ${uniqueAccountIds.length} bindings)`,
+        );
+        return resolveFeishuAccount({ cfg, accountId: preferredAccountId });
+      }
       throw new Error(
-        `[feishu:routing] level=3 (bindings-fallback) AMBIGUOUS: agent "${agentId}" matched ` +
-        `${uniqueAccountIds.length} distinct feishu accountIds: [${uniqueAccountIds.join(", ")}]. ` +
-        `Ensure only one feishu accountId binding exists for this agent, ` +
-        `or use the asAccountId parameter for explicit delegation.`,
+        `[feishu:routing] level=3 (bindings-fallback) AMBIGUOUS: agent "${agentId}" has ` +
+        `${uniqueAccountIds.length} feishu bindings: [${uniqueAccountIds.join(", ")}]. ` +
+        `Use the asAccountId parameter to specify which Feishu account to use.`,
       );
     }
 
@@ -190,8 +203,10 @@ export async function withFeishuToolClient<T>(params: {
     throw new Error("Feishu config is not available");
   }
 
-  // Resolve the calling account (who is actually making this tool call)
-  const callingAccount = resolveToolAccount(api.config, agentAccountId, agentId);
+  // Resolve the calling account (who is actually making this tool call).
+  // When asAccountId is provided and matches one of the agent's bindings, it is used as the
+  // preferred account to avoid AMBIGUOUS errors for multi-binding agents.
+  const callingAccount = resolveToolAccount(api.config, agentAccountId, agentId, asAccountId);
 
   // Resolve the effective account (may differ if asAccountId delegation is requested)
   let account = callingAccount;

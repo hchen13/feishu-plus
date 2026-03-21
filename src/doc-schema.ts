@@ -1,5 +1,14 @@
 import { Type, type Static } from "@sinclair/typebox";
 
+const AccountIdField = Type.Optional(
+  Type.String({
+    description:
+      "Feishu bot account ID to use (for agents bound to multiple Feishu apps across organizations). " +
+      "Matches the account key in OpenClaw config channels.feishu.accounts. " +
+      "Omit to use the default account from the current context.",
+  }),
+);
+
 const tableCreationProperties = {
   doc_token: Type.String({ description: "Document token" }),
   parent_block_id: Type.Optional(
@@ -177,6 +186,11 @@ export const FeishuDocSchema = Type.Union([
         'Text with color markup. Tags: [red], [green], [blue], [orange], [yellow], [purple], [grey], [bold], [bg:yellow]. Example: "Revenue [green]+15%[/green] YoY"',
     }),
   }),
+], { description: "Action-specific parameters" });
+
+export const FeishuDocSchemaWithAccount = Type.Intersect([
+  FeishuDocSchema,
+  Type.Object({ accountId: AccountIdField }),
 ]);
 
-export type FeishuDocParams = Static<typeof FeishuDocSchema>;
+export type FeishuDocParams = Static<typeof FeishuDocSchemaWithAccount>;

@@ -158,6 +158,24 @@ export const FeishuGroupSchema = z
   })
   .strict();
 
+const QuotaGroupSchema = z
+  .object({
+    name: z.string().optional(),
+    members: z.array(z.union([z.string(), z.number()])),
+    dailyLimit: z.number().int().optional(), // -1 = unlimited, undefined = unlimited
+    models: z.union([z.literal("*"), z.array(z.string())]).optional(),
+  })
+  .strict();
+
+const QuotaSchema = z
+  .object({
+    blockMessage: z.string().optional(),
+    modelBlockMessage: z.string().optional(),
+    groups: z.array(QuotaGroupSchema).optional(),
+  })
+  .strict()
+  .optional();
+
 const CommandControlGroupSchema = z
   .object({
     name: z.string(),
@@ -209,6 +227,7 @@ const FeishuSharedConfigShape = {
   resolveSenderNames: z.boolean().optional(),
   userGroups: z.record(z.string(), z.array(z.union([z.string(), z.number()]))).optional(),
   commandControl: CommandControlSchema,
+  quotas: QuotaSchema,
 };
 
 /**

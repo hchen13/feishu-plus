@@ -17,6 +17,8 @@ import { resolveFeishuAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { finalizeFeishuMessageProcessing, tryRecordMessagePersistent } from "./dedup.js";
 import { checkFeishuCommandControl } from "./command-control.js";
+import { resolveQuotaGroup, checkModelAllowed, resolveModelDowngrade, setModelOverride, getOrCreateQuotaCounter } from "./quota.js";
+import type { QuotaGroupConfig } from "./quota.js";
 import { maybeCreateDynamicAgent } from "./dynamic-agent.js";
 import { normalizeFeishuExternalKey } from "./external-keys.js";
 import { downloadMessageResourceFeishu } from "./media.js";
@@ -1281,6 +1283,63 @@ export async function handleFeishuMessage(params: {
       }
     }
 
+    // ── Quota check ──
+    const quotaCounter = getOrCreateQuotaCounter(account.accountId);
+    const quotaGroup: QuotaGroupConfig | undefined = resolveQuotaGroup(
+      [senderUserId, ctx.senderOpenId].filter(Boolean) as string[],
+      feishuCfg.quotas?.groups ?? [],
+      feishuCfg.userGroups ?? {},
+    );
+
+    if (quotaGroup) {
+      const effectiveDailyLimit = quotaGroup.dailyLimit ?? -1;
+      const senderId = senderUserId ?? ctx.senderOpenId;
+
+      // Daily limit
+      if (effectiveDailyLimit !== -1) {
+        const result = quotaCounter.check(senderId, effectiveDailyLimit);
+        if (!result.allowed) {
+          const msg = feishuCfg.quotas?.blockMessage ?? "Daily quota exceeded.";
+          await sendMessageFeishu({ cfg, to: `chat:${ctx.chatId}`, text: msg, accountId: account.accountId });
+          log(`feishu[${account.accountId}]: quota exceeded for ${senderId} (${result.used}/${result.limit})`);
+          return;
+        }
+      }
+
+      // Model restriction
+      const targetAgentId = route?.agentId;
+      const agentConfig = targetAgentId
+        ? (cfg.agents?.list ?? []).find((a: any) => a.id === targetAgentId)
+        : undefined;
+      const rawModel = agentConfig?.model;
+      const agentModel: string | undefined =
+        typeof rawModel === "string" ? rawModel
+        : typeof rawModel === "object" && rawModel?.primary ? String(rawModel.primary)
+        : agentConfig?.models?.default;
+
+      const configuredModels = cfg.agents?.defaults?.models as Record<string, { alias?: string }> | undefined;
+
+      if (!checkModelAllowed(quotaGroup.models, agentModel, configuredModels)) {
+        // Auto-downgrade: find the best model the user is allowed to use
+        const allowedModelList = Array.isArray(quotaGroup.models) ? quotaGroup.models : [];
+        const downgradeModel = resolveModelDowngrade(allowedModelList, configuredModels);
+        if (downgradeModel) {
+          // Store override so before_model_resolve hook can apply it
+          const sessionKey = route?.sessionKey;
+          if (sessionKey) {
+            setModelOverride(sessionKey, downgradeModel);
+            log(`feishu[${account.accountId}]: model downgrade for ${senderId}: "${agentModel}" → "${downgradeModel}" (group: ${quotaGroup.name ?? "unnamed"})`);
+          }
+        } else {
+          // No compatible model found — block as last resort
+          const msg = feishuCfg.quotas?.modelBlockMessage ?? "Model not available for your account.";
+          await sendMessageFeishu({ cfg, to: `chat:${ctx.chatId}`, text: msg, accountId: account.accountId });
+          log(`feishu[${account.accountId}]: model "${agentModel}" not allowed for ${senderId}, no downgrade available (group: ${quotaGroup.name ?? "unnamed"})`);
+          return;
+        }
+      }
+    }
+
     const preview = ctx.content.replace(/\s+/g, " ").slice(0, 160);
     const inboundLabel = isGroup
       ? `Feishu[${account.accountId}] message in group ${ctx.chatId}`
@@ -1325,7 +1384,7 @@ export async function handleFeishuMessage(params: {
     }
 
     const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(cfg);
-    const messageBody = buildFeishuAgentBody({
+    let messageBody = buildFeishuAgentBody({
       ctx,
       quotedContent,
       permissionErrorForAgent,
@@ -1348,7 +1407,7 @@ export async function handleFeishuMessage(params: {
     let combinedBody = body;
     const historyKey = groupHistoryKey;
 
-    if (isGroup && ctx.mentionedBot && feishuCfg?.milestoneContext?.enabled !== false) {
+    if (isGroup && (ctx.mentionedBot || !requireMention) && feishuCfg?.milestoneContext?.enabled !== false) {
       try {
         const milestoneCtx = await buildMilestonePrefix(
           ctx.chatId,
@@ -1357,6 +1416,7 @@ export async function handleFeishuMessage(params: {
         );
         if (milestoneCtx) {
           combinedBody = `${milestoneCtx}\n\n${combinedBody}`;
+          messageBody = `${milestoneCtx}\n\n${messageBody}`;
           log(`feishu[${account.accountId}]: injected milestone context for group ${ctx.chatId}`);
         }
       } catch (err) {
@@ -1585,6 +1645,11 @@ export async function handleFeishuMessage(params: {
       log(
         `feishu[${account.accountId}]: broadcast dispatch complete for ${broadcastAgents.length} agents`,
       );
+
+      // Increment quota after successful broadcast dispatch
+      if (quotaGroup && (quotaGroup.dailyLimit ?? -1) !== -1) {
+        quotaCounter.increment(senderUserId ?? ctx.senderOpenId);
+      }
     } else {
       // --- Single-agent dispatch (existing behavior) ---
       const ctxPayload = buildCtxPayloadForAgent(
@@ -1635,6 +1700,11 @@ export async function handleFeishuMessage(params: {
       log(
         `feishu[${account.accountId}]: dispatch complete (queuedFinal=${queuedFinal}, replies=${counts.final})`,
       );
+
+      // Increment quota after successful single-agent dispatch
+      if (quotaGroup && (quotaGroup.dailyLimit ?? -1) !== -1) {
+        quotaCounter.increment(senderUserId ?? ctx.senderOpenId);
+      }
     }
   } catch (err) {
     error(`feishu[${account.accountId}]: failed to dispatch message: ${String(err)}`);

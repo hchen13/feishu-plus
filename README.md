@@ -164,7 +164,7 @@ How multi-binding routing works:
 
 - **Inbound message → reply:** the plugin knows which Feishu app received the message and replies through the same app. Zero ambiguity.
 - **Agent-initiated tool calls:** the agent must pass `accountId` (or `asAccountId` for tools that use it) to specify which Feishu app to use. If the agent omits the parameter and multiple bindings exist, the tool raises an explicit routing error — no silent fallback, no cross-org misrouting.
-- **All Feishu tools** (`feishu_doc`, `feishu_wiki`, `feishu_drive`, `feishu_chat`, `feishu_perm`, `feishu_app_scopes`, bitable, sheet, task) support explicit account selection via their `accountId` or `asAccountId` parameter.
+- **All Feishu tools** (`feishu_doc`, `feishu_wiki`, `feishu_drive`, `feishu_chat`, `feishu_perm`, `feishu_app_scopes`, `feishu_id`, `feishu_id_admin`, bitable, sheet, task) support explicit account selection via their `accountId` or `asAccountId` parameter.
 
 ## Feishu App Setup
 
@@ -503,6 +503,10 @@ Local additions or expansions in this fork:
   - meta lookup from URL, field CRUD, record CRUD, batch delete
 - `feishu_task_*`
   - create, get, update, delete
+- `feishu_id`
+  - resolve (ID conversion across open_id/union_id/user_id/chat_id), lookup (email/phone → IDs), whois (full profile), members (enriched with all ID types), my_chats, search_chats
+- `feishu_id_admin`
+  - rebuild_index (scan session history for observed IDs), search_observed (zero-API local search), verify_matrix (cross-account visibility report), explain_visibility (single-target deep diagnosis)
 
 Optional sensitive tooling:
 

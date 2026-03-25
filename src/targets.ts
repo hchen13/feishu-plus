@@ -2,6 +2,7 @@ import type { FeishuIdType } from "./types.js";
 
 const CHAT_ID_PREFIX = "oc_";
 const OPEN_ID_PREFIX = "ou_";
+const UNION_ID_PREFIX = "on_";
 const USER_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 
 function stripProviderPrefix(raw: string): string {
@@ -15,6 +16,9 @@ export function detectIdType(id: string): FeishuIdType | null {
   }
   if (trimmed.startsWith(OPEN_ID_PREFIX)) {
     return "open_id";
+  }
+  if (trimmed.startsWith(UNION_ID_PREFIX)) {
+    return "union_id";
   }
   if (USER_ID_REGEX.test(trimmed)) {
     return "user_id";

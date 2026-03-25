@@ -10,6 +10,8 @@ import { registerFeishuPermTools } from "./src/perm.js";
 import { registerFeishuBitableTools } from "./src/bitable.js";
 import { registerFeishuTaskTools } from "./src/task.js";
 import { registerFeishuSheetTools } from "./src/sheet.js";
+import { registerFeishuIdTools } from "./src/id-index.js";
+import { registerFeishuIdAdminTools } from "./src/id-index-admin.js";
 
 export { monitorFeishuProvider } from "./src/monitor.js";
 export {
@@ -63,6 +65,8 @@ const plugin = {
     registerFeishuBitableTools(api);
     registerFeishuTaskTools(api);
     registerFeishuSheetTools(api);
+    registerFeishuIdTools(api);
+    registerFeishuIdAdminTools(api);
   },
 };
 

@@ -95,6 +95,7 @@ export type FeishuToolsConfig = {
   scopes?: boolean;
   task?: boolean;
   sheet?: boolean;
+  id?: boolean;
 };
 
 export type DynamicAgentCreationConfig = {

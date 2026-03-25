@@ -14,6 +14,7 @@ export const DEFAULT_TOOLS_CONFIG: Required<FeishuToolsConfig> = {
   scopes: true,
   task: true,
   sheet: true,
+  id: true,
 };
 
 /**

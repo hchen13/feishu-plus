@@ -176,23 +176,43 @@ export function resolveModelDowngrade(
   return best;
 }
 
-// ── Per-session model override cache ──
+// ── Per-turn model+thinking override cache ──
+//
+// Overrides are scoped to a single dispatch turn.
+// bot.ts sets the override just before dispatch and clears it in a finally
+// block, so concurrent turns on different sessions never interfere.
 
-const modelOverrides = new Map<string, string>();
-
-export function setModelOverride(sessionKey: string, modelId: string): void {
-  modelOverrides.set(sessionKey, modelId);
+export interface TurnOverride {
+  /** Full "provider/modelId" key to use for this turn. */
+  model: string;
+  /**
+   * Thinking level for this turn.
+   * "off" when the downgrade target doesn't support reasoning.
+   * undefined means "don't override thinking" (let session value stand).
+   *
+   * NOTE: the before_model_resolve hook can only return modelOverride /
+   * providerOverride — the SDK has no thinkingOverride field yet.
+   * The thinking value is stored here so the infrastructure is ready
+   * once SDK support is added.
+   */
+  thinking?: string;
 }
 
-export function consumeModelOverride(sessionKey: string): string | undefined {
-  const override = modelOverrides.get(sessionKey);
-  // Don't delete — the override should persist for the session lifetime
-  // so every turn uses the downgraded model, not just the first.
+const turnOverrides = new Map<string, TurnOverride>();
+
+export function setTurnOverride(sessionKey: string, override: TurnOverride): void {
+  turnOverrides.set(sessionKey, override);
+}
+
+/** Reads and removes the override for this session key. */
+export function consumeTurnOverride(sessionKey: string): TurnOverride | undefined {
+  const override = turnOverrides.get(sessionKey);
+  turnOverrides.delete(sessionKey);
   return override;
 }
 
-export function clearModelOverride(sessionKey: string): void {
-  modelOverrides.delete(sessionKey);
+export function clearTurnOverride(sessionKey: string): void {
+  turnOverrides.delete(sessionKey);
 }
 
 // ── Daily quota counter with persistence ──

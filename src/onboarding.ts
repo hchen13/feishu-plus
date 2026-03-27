@@ -16,7 +16,7 @@ import {
   setTopLevelChannelAllowFrom,
   setTopLevelChannelDmPolicyWithAllowFrom,
   setTopLevelChannelGroupPolicy,
-  splitOnboardingEntries,
+  splitSetupEntries,
 } from "openclaw/plugin-sdk/feishu";
 import { resolveFeishuCredentials } from "./accounts.js";
 import { probeFeishu } from "./probe.js";
@@ -71,7 +71,7 @@ async function promptFeishuAllowFrom(params: {
       initialValue: existing[0] ? String(existing[0]) : undefined,
       validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
     });
-    const parts = splitOnboardingEntries(String(entry));
+    const parts = splitSetupEntries(String(entry));
     if (parts.length === 0) {
       await params.prompter.note("Enter at least one user.", "Feishu allowlist");
       continue;
@@ -462,7 +462,7 @@ export const feishuOnboardingAdapter: ChannelOnboardingAdapter = {
         initialValue: existing.length > 0 ? existing.map(String).join(", ") : undefined,
       });
       if (entry) {
-        const parts = splitOnboardingEntries(String(entry));
+        const parts = splitSetupEntries(String(entry));
         if (parts.length > 0) {
           next = setFeishuGroupAllowFrom(next, parts);
         }

@@ -3,10 +3,9 @@ import {
   buildAgentMediaPayload,
   buildPendingHistoryContextFromMap,
   clearHistoryEntriesIfEnabled,
-  createScopedPairingAccess,
+  createChannelPairingController,
   DEFAULT_GROUP_HISTORY_LIMIT,
   type HistoryEntry,
-  issuePairingChallenge,
   normalizeAgentId,
   recordPendingHistoryEntryIfEnabled,
   resolveOpenProviderRuntimeGroupPolicy,
@@ -17,7 +16,7 @@ import { resolveFeishuAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { finalizeFeishuMessageProcessing, tryRecordMessagePersistent } from "./dedup.js";
 import { checkFeishuCommandControl } from "./command-control.js";
-import { resolveQuotaGroup, checkModelAllowed, resolveModelDowngrade, setModelOverride, getOrCreateQuotaCounter } from "./quota.js";
+import { resolveQuotaGroup, checkModelAllowed, resolveModelDowngrade, setTurnOverride, clearTurnOverride, getOrCreateQuotaCounter } from "./quota.js";
 import type { QuotaGroupConfig } from "./quota.js";
 import { maybeCreateDynamicAgent } from "./dynamic-agent.js";
 import { normalizeFeishuExternalKey } from "./external-keys.js";
@@ -869,6 +868,46 @@ export function buildFeishuAgentBody(params: {
   return messageBody;
 }
 
+/**
+ * Determine the thinking level override for a downgraded model.
+ *
+ * Returns "off" when the model doesn't support reasoning so the SDK won't
+ * attempt to use extended thinking on a model that can't handle it.
+ * Returns undefined when the model supports reasoning (session value stands).
+ *
+ * Detection order:
+ * 1. Custom provider config (cfg.models.providers) — explicit reasoning flag
+ * 2. Built-in Anthropic rule: claude-opus/sonnet 4.6 → reasoning supported
+ * 3. Default → "off" (conservative)
+ */
+function resolveDowngradeThinking(
+  modelKey: string,
+  cfg: ClawdbotConfig,
+): "off" | undefined {
+  const slashIdx = modelKey.indexOf("/");
+  const provider = slashIdx !== -1 ? modelKey.slice(0, slashIdx) : "";
+  const modelId = slashIdx !== -1 ? modelKey.slice(slashIdx + 1) : modelKey;
+
+  // Check custom provider config first
+  const customProviders = (cfg as any).models?.providers as
+    | Record<string, { models?: Array<{ id: string; reasoning?: boolean }> }>
+    | undefined;
+  if (customProviders?.[provider]?.models) {
+    const entry = customProviders[provider].models!.find((m) => m.id === modelId);
+    if (entry) {
+      return entry.reasoning ? undefined : "off";
+    }
+  }
+
+  // Built-in Anthropic rule (mirrors SDK's CLAUDE_46_MODEL_RE logic)
+  if (provider === "anthropic") {
+    const REASONING_RE = /claude-(?:opus|sonnet)-4(?:\.|-)6/i;
+    return REASONING_RE.test(modelId) ? undefined : "off";
+  }
+
+  return "off";
+}
+
 export async function handleFeishuMessage(params: {
   cfg: ClawdbotConfig;
   event: FeishuMessageEvent;
@@ -1123,7 +1162,7 @@ export async function handleFeishuMessage(params: {
 
   try {
     const core = getFeishuRuntime();
-    const pairing = createScopedPairingAccess({
+    const pairing = createChannelPairingController({
       core,
       channel: "feishu",
       accountId: account.accountId,
@@ -1149,12 +1188,10 @@ export async function handleFeishuMessage(params: {
 
     if (isDirect && dmPolicy !== "open" && !dmAllowed) {
       if (dmPolicy === "pairing") {
-        await issuePairingChallenge({
-          channel: "feishu",
+        await pairing.issueChallenge({
           senderId: ctx.senderOpenId,
           senderIdLine: `Your Feishu user id: ${ctx.senderOpenId}`,
           meta: { name: ctx.senderName },
-          upsertPairingRequest: pairing.upsertPairingRequest,
           onCreated: () => {
             log(`feishu[${account.accountId}]: pairing request sender=${ctx.senderOpenId}`);
           },
@@ -1284,6 +1321,12 @@ export async function handleFeishuMessage(params: {
     }
 
     // ── Quota check ──
+    // pendingTurnOverride holds the per-turn model/thinking downgrade for this
+    // sender. It is set into the turnOverrides Map immediately before each
+    // dispatch call (keyed by the actual sessionKey used for that run) and
+    // cleared in the finally block, so broadcast and single-agent paths both
+    // work correctly with the before_model_resolve hook.
+    let pendingTurnOverride: import("./quota.js").TurnOverride | undefined;
     const quotaCounter = getOrCreateQuotaCounter(account.accountId);
     const quotaGroup: QuotaGroupConfig | undefined = resolveQuotaGroup(
       [senderUserId, ctx.senderOpenId].filter(Boolean) as string[],
@@ -1324,12 +1367,11 @@ export async function handleFeishuMessage(params: {
         const allowedModelList = Array.isArray(quotaGroup.models) ? quotaGroup.models : [];
         const downgradeModel = resolveModelDowngrade(allowedModelList, configuredModels);
         if (downgradeModel) {
-          // Store override so before_model_resolve hook can apply it
-          const sessionKey = route?.sessionKey;
-          if (sessionKey) {
-            setModelOverride(sessionKey, downgradeModel);
-            log(`feishu[${account.accountId}]: model downgrade for ${senderId}: "${agentModel}" → "${downgradeModel}" (group: ${quotaGroup.name ?? "unnamed"})`);
-          }
+          // Determine whether the downgrade target supports reasoning.
+          // If not, store thinking="off" so future SDK support can suppress it.
+          const thinking = resolveDowngradeThinking(downgradeModel, cfg);
+          pendingTurnOverride = { model: downgradeModel, thinking };
+          log(`feishu[${account.accountId}]: model downgrade for ${senderId}: "${agentModel}" → "${downgradeModel}" thinking=${thinking ?? "keep"} (group: ${quotaGroup.name ?? "unnamed"})`);
         } else {
           // No compatible model found — block as last resort
           const msg = feishuCfg.quotas?.modelBlockMessage ?? "Model not available for your account.";
@@ -1552,64 +1594,69 @@ export async function handleFeishuMessage(params: {
           ctx.mentionedBot && agentId === activeAgentId,
         );
 
-        if (agentId === activeAgentId) {
-          // Active agent: real Feishu dispatcher (responds on Feishu)
-          const { dispatcher, replyOptions, markDispatchIdle } = createFeishuReplyDispatcher({
-            cfg,
-            agentId,
-            runtime: runtime as RuntimeEnv,
-            chatId: ctx.chatId,
-            chatType: ctx.chatType,
-            replyToMessageId: replyTargetMessageId,
-            skipReplyToInMessages: !isGroup,
-            replyInThread,
-            rootId: ctx.rootId,
-            threadReply,
-            mentionTargets: ctx.mentionTargets,
-            accountId: account.accountId,
-            messageCreateTimeMs,
-          });
+        if (pendingTurnOverride) setTurnOverride(agentSessionKey, pendingTurnOverride);
+        try {
+          if (agentId === activeAgentId) {
+            // Active agent: real Feishu dispatcher (responds on Feishu)
+            const { dispatcher, replyOptions, markDispatchIdle } = createFeishuReplyDispatcher({
+              cfg,
+              agentId,
+              runtime: runtime as RuntimeEnv,
+              chatId: ctx.chatId,
+              chatType: ctx.chatType,
+              replyToMessageId: replyTargetMessageId,
+              skipReplyToInMessages: !isGroup,
+              replyInThread,
+              rootId: ctx.rootId,
+              threadReply,
+              mentionTargets: ctx.mentionTargets,
+              accountId: account.accountId,
+              messageCreateTimeMs,
+            });
 
-          log(
-            `feishu[${account.accountId}]: broadcast active dispatch agent=${agentId} (session=${agentSessionKey})`,
-          );
-          await core.channel.reply.withReplyDispatcher({
-            dispatcher,
-            onSettled: () => markDispatchIdle(),
-            run: () =>
-              core.channel.reply.dispatchReplyFromConfig({
-                ctx: agentCtx,
-                cfg,
-                dispatcher,
-                replyOptions,
-              }),
-          });
-        } else {
-          // Observer agent: no-op dispatcher (session entry + inference, no Feishu reply).
-          // Strip CommandAuthorized so slash commands (e.g. /reset) don't silently
-          // mutate observer sessions — only the active agent should execute commands.
-          delete (agentCtx as Record<string, unknown>).CommandAuthorized;
-          const noopDispatcher = {
-            sendToolResult: () => false,
-            sendBlockReply: () => false,
-            sendFinalReply: () => false,
-            waitForIdle: async () => {},
-            getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
-            markComplete: () => {},
-          };
+            log(
+              `feishu[${account.accountId}]: broadcast active dispatch agent=${agentId} (session=${agentSessionKey})`,
+            );
+            await core.channel.reply.withReplyDispatcher({
+              dispatcher,
+              onSettled: () => markDispatchIdle(),
+              run: () =>
+                core.channel.reply.dispatchReplyFromConfig({
+                  ctx: agentCtx,
+                  cfg,
+                  dispatcher,
+                  replyOptions,
+                }),
+            });
+          } else {
+            // Observer agent: no-op dispatcher (session entry + inference, no Feishu reply).
+            // Strip CommandAuthorized so slash commands (e.g. /reset) don't silently
+            // mutate observer sessions — only the active agent should execute commands.
+            delete (agentCtx as Record<string, unknown>).CommandAuthorized;
+            const noopDispatcher = {
+              sendToolResult: () => false,
+              sendBlockReply: () => false,
+              sendFinalReply: () => false,
+              waitForIdle: async () => {},
+              getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
+              markComplete: () => {},
+            };
 
-          log(
-            `feishu[${account.accountId}]: broadcast observer dispatch agent=${agentId} (session=${agentSessionKey})`,
-          );
-          await core.channel.reply.withReplyDispatcher({
-            dispatcher: noopDispatcher,
-            run: () =>
-              core.channel.reply.dispatchReplyFromConfig({
-                ctx: agentCtx,
-                cfg,
-                dispatcher: noopDispatcher,
-              }),
-          });
+            log(
+              `feishu[${account.accountId}]: broadcast observer dispatch agent=${agentId} (session=${agentSessionKey})`,
+            );
+            await core.channel.reply.withReplyDispatcher({
+              dispatcher: noopDispatcher,
+              run: () =>
+                core.channel.reply.dispatchReplyFromConfig({
+                  ctx: agentCtx,
+                  cfg,
+                  dispatcher: noopDispatcher,
+                }),
+            });
+          }
+        } finally {
+          if (pendingTurnOverride) clearTurnOverride(agentSessionKey);
         }
       };
 
@@ -1675,19 +1722,26 @@ export async function handleFeishuMessage(params: {
       });
 
       log(`feishu[${account.accountId}]: dispatching to agent (session=${route.sessionKey})`);
-      const { queuedFinal, counts } = await core.channel.reply.withReplyDispatcher({
-        dispatcher,
-        onSettled: () => {
-          markDispatchIdle();
-        },
-        run: () =>
-          core.channel.reply.dispatchReplyFromConfig({
-            ctx: ctxPayload,
-            cfg,
-            dispatcher,
-            replyOptions,
-          }),
-      });
+      if (pendingTurnOverride) setTurnOverride(route.sessionKey, pendingTurnOverride);
+      let queuedFinal: boolean;
+      let counts: Record<string, number>;
+      try {
+        ({ queuedFinal, counts } = await core.channel.reply.withReplyDispatcher({
+          dispatcher,
+          onSettled: () => {
+            markDispatchIdle();
+          },
+          run: () =>
+            core.channel.reply.dispatchReplyFromConfig({
+              ctx: ctxPayload,
+              cfg,
+              dispatcher,
+              replyOptions,
+            }),
+        }));
+      } finally {
+        if (pendingTurnOverride) clearTurnOverride(route.sessionKey);
+      }
 
       if (isGroup && historyKey && chatHistories) {
         clearHistoryEntriesIfEnabled({

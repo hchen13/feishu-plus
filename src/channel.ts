@@ -1,8 +1,8 @@
 import {
   collectAllowlistProviderRestrictSendersWarnings,
-  formatAllowFromLowercase,
   mapAllowFromEntries,
-} from "openclaw/plugin-sdk/compat";
+} from "openclaw/plugin-sdk/channel-config-helpers";
+import { formatAllowFromLowercase } from "openclaw/plugin-sdk/allow-from";
 import type { ChannelMeta, ChannelPlugin, ClawdbotConfig } from "openclaw/plugin-sdk/feishu";
 import {
   buildProbeChannelStatusSummary,

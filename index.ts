@@ -3,6 +3,7 @@ import { emptyPluginConfigSchema } from "openclaw/plugin-sdk/feishu";
 import { registerFeishuChatTools } from "./src/chat.js";
 import { feishuPlugin } from "./src/channel.js";
 import { setFeishuRuntime } from "./src/runtime.js";
+import { consumeTurnOverride } from "./src/quota.js";
 import { registerFeishuDocTools } from "./src/docx.js";
 import { registerFeishuWikiTools } from "./src/wiki.js";
 import { registerFeishuDriveTools } from "./src/drive.js";
@@ -57,6 +58,22 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     setFeishuRuntime(api.runtime);
     api.registerChannel({ plugin: feishuPlugin });
+
+    // Apply per-turn model downgrade for quota-restricted users.
+    // bot.ts sets a TurnOverride in the Map just before dispatch and clears it
+    // in a finally block, so this hook only fires when a downgrade is needed.
+    api.on("before_model_resolve", (_event, ctx) => {
+      if (!ctx.sessionKey) return;
+      const override = consumeTurnOverride(ctx.sessionKey);
+      if (!override) return;
+      const slashIdx = override.model.indexOf("/");
+      const providerOverride = slashIdx !== -1 ? override.model.slice(0, slashIdx) : undefined;
+      const modelOverride = slashIdx !== -1 ? override.model.slice(slashIdx + 1) : override.model;
+      // NOTE: override.thinking is computed and stored but the SDK's
+      // before_model_resolve result has no thinkingOverride field yet.
+      // When SDK support is added, pass override.thinking here.
+      return { modelOverride, providerOverride };
+    });
     registerFeishuDocTools(api);
     registerFeishuChatTools(api);
     registerFeishuWikiTools(api);

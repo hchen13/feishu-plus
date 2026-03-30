@@ -34,7 +34,7 @@ This distribution is **Feishu-only**. Some inherited source files still use `Lar
 
 - **Multi-account architecture**. The bundled Feishu plugin connects a single Feishu app to the entire OpenClaw instance. `feishu-plus` supports two layers of multi-account: (1) each agent can have its own dedicated Feishu app with independent credentials, permissions, and behavior settings; (2) a single agent can be bound to multiple Feishu apps across different organizations, so the same agent serves users in your personal tenant and your corporate tenant simultaneously. Inbound messages route automatically; outbound tool calls use explicit account selection to prevent cross-org misrouting.
 - **GroupSense**. Multi-agent group chats become materially more natural because later prompts can see milestone summaries and recent raw group history, not just the latest `@mention`.
-- **Milestone-aware prompting**. Group discussion windows are periodically summarized and stored under `~/.openclaw/shared-knowledge/feishu-group-milestones`.
+- **Milestone-aware prompting**. Group discussion windows are periodically summarized via LLM and stored under `~/.openclaw/shared-knowledge/feishu-group-milestones`. Bot outbound messages are also recorded. Group sessions roll over after each dispatch so every turn uses only the refined GroupSense context.
 - **Long-form reply delivery**. `textChunkLimit`, card rendering, and Feishu-specific reply behavior are tuned for large markdown outputs.
 - **Dedicated sheet tooling**. This fork ships a full sheet workflow instead of treating spreadsheets as a side case.
 - **Expanded bitable tooling**. The bitable surface covers metadata, fields, records, and batch deletion in a way that fits real operations.
@@ -46,7 +46,7 @@ This distribution is **Feishu-only**. Some inherited source files still use `Lar
 - OpenClaw `>= 2026.3.13`
 - Node.js `>= 20`
 - One or more Feishu self-built apps
-- If you enable `milestoneContext`: a host OpenClaw instance with a reachable local gateway and a headless agent whose id is exactly `summarizer`
+- If you enable `milestoneContext`: OpenClaw `>= 2026.3.24` (for the `agent-runtime` simple-completion API)
 
 ## Installation
 
@@ -250,55 +250,30 @@ If authentication succeeds but results are empty, or permission errors persist, 
 
 **GroupSense** is the public name for this fork's context-enhancement layer for multi-agent group chats.
 
-Operationally, it does four things:
+Operationally, it does five things:
 
-1. Records recent group turns per chat.
-2. Periodically summarizes a discussion window into milestones.
+1. Records recent group turns per chat — including bot-initiated outbound messages (via the Message tool, etc.).
+2. Periodically summarizes a discussion window into milestones using an LLM call (via the plugin-sdk `agent-runtime` API).
 3. Stores those milestones under `~/.openclaw/shared-knowledge/feishu-group-milestones`.
 4. Injects milestone summaries plus recent raw group history back into later prompts.
+5. Rolls over the group session after each dispatch (stateless mode), so every turn starts with only the refined GroupSense context — no LLM history accumulation, no wasted tokens.
 
 The resulting user experience is straightforward: one agent can respond with immediate context about what another agent recently argued, decided, or promised, so the group feels less like isolated bots and more like a coherent team conversation.
 
-### GroupSense is not self-contained
+### LLM summarization
 
-`milestoneContext` is implemented inside this plugin, but the summarization step depends on the host OpenClaw runtime:
+GroupSense uses the OpenClaw plugin-sdk `agent-runtime` API (`prepareSimpleCompletionModel` + `completeWithPreparedSimpleCompletionModel`) to call an LLM for milestone extraction. No separate summarizer agent or gateway RPC is needed.
 
-- it dynamically resolves an internal gateway helper
-- it calls `agent`, `agent.wait`, `chat.history`, and `sessions.delete`
-- it expects a headless agent whose id is exactly `summarizer`
-
-If that host-side contract is missing, the plugin falls back to a regex summarizer. The feature still runs, but summary quality is materially worse.
-
-### Host-side summarizer contract
-
-Add a headless agent like this to `openclaw.json`:
+The model defaults to the global `agents.defaults.model.primary` in `openclaw.json`. You can override it per-account with the `milestoneContext.model` field:
 
 ```json
-{
-  "id": "summarizer",
-  "name": "Summarizer",
-  "workspace": "/Users/you/.openclaw/agents/summarizer",
-  "model": {
-    "primary": "zhipu-coding/GLM-5"
-  },
-  "skills": [],
-  "subagents": {
-    "allowAgents": []
-  }
+"milestoneContext": {
+  "enabled": true,
+  "model": "zhipu-coding/GLM-5"
 }
 ```
 
-The recommended workspace template is:
-
-- [`docs/summarizer/AGENTS.md`](./docs/summarizer/AGENTS.md)
-
-Copy it into the summarizer agent's workspace directory. The summarizer is a headless extraction endpoint, not a user-facing agent.
-
-Guidelines:
-
-- Keep this agent headless. Do not bind it to Feishu or any other chat channel.
-- Keep the workspace contract narrow: JSON extraction only, no personality, no side workflows.
-- The `AGENTS.md` contract includes strict length limits (10–20 words per item, never exceeding 30) to ensure milestones stay concise and fit cleanly into later prompts.
+Format is `provider/modelId`. If the LLM call fails, the plugin falls back to a regex-based summarizer. The feature still runs, but summary quality is materially worse.
 
 ## Reply Delivery And Long Markdown
 
@@ -587,7 +562,7 @@ If you are an AI agent helping a human operator deploy this plugin, use this ord
 6. Write the smallest working `channels.feishu` block first. Add per-account overrides only after DM and group delivery work.
 7. Add explicit Feishu `accountId` bindings for every agent that will use Feishu tools.
 8. **Configure command control.** Collect user IDs from the Feishu admin panel (each employee's `user_id` is visible under the admin console's member management). Use `user_id` values — not `open_id` — in `userGroups` so one entry per person covers all bots. If you cannot obtain a user's `user_id`, have them send any message to one of the bots and read the `user_id` from the gateway log.
-9. If `milestoneContext` is enabled, create a headless `summarizer` agent with id exactly `summarizer`, and copy [`docs/summarizer/AGENTS.md`](./docs/summarizer/AGENTS.md) into its workspace.
+9. If `milestoneContext` is enabled, ensure the OpenClaw version is `>= 2026.3.24` so the `agent-runtime` simple-completion API is available. Optionally set `milestoneContext.model` to control which model is used for summarization.
 10. Verify event subscriptions before debugging message flow.
 11. Test at least these cases:
     - DM round-trip

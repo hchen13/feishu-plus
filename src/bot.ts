@@ -24,6 +24,7 @@ import { downloadMessageResourceFeishu } from "./media.js";
 import {
   buildMilestonePrefix,
   evaluateMilestoneForChat,
+  markGroupChat,
   recordGroupMessageForMilestone,
 } from "./milestone-context.js";
 import { extractMentionTargets, isMentionForwardRequest } from "./mention.js";
@@ -39,6 +40,7 @@ import { getFeishuRuntime } from "./runtime.js";
 import { getMessageFeishu, sendMessageFeishu } from "./send.js";
 import type { FeishuMessageContext, FeishuMediaInfo, ResolvedFeishuAccount } from "./types.js";
 import type { DynamicAgentCreationConfig } from "./types.js";
+import { rolloverStatelessGroupSession } from "./stateless-session.js";
 
 // --- Permission error extraction ---
 // Extract permission grant URL from Feishu API error response.
@@ -1110,6 +1112,8 @@ export async function handleFeishuMessage(params: {
       groupConfig,
     }));
 
+    markGroupChat(ctx.chatId);
+
     if (feishuCfg?.milestoneContext?.enabled !== false) {
       await recordGroupMessageForMilestone({
         chatId: ctx.chatId,
@@ -1689,6 +1693,11 @@ export async function handleFeishuMessage(params: {
         });
       }
 
+      // GroupSense is active: rollover session so next turn starts fresh (no LLM history accumulation)
+      if (isGroup && feishuCfg?.milestoneContext?.enabled !== false) {
+        await rolloverStatelessGroupSession({ agentId: route.agentId, sessionKey: route.sessionKey, log });
+      }
+
       log(
         `feishu[${account.accountId}]: broadcast dispatch complete for ${broadcastAgents.length} agents`,
       );
@@ -1749,6 +1758,11 @@ export async function handleFeishuMessage(params: {
           historyKey,
           limit: historyLimit,
         });
+      }
+
+      // GroupSense is active: rollover session so next turn starts fresh (no LLM history accumulation)
+      if (isGroup && feishuCfg?.milestoneContext?.enabled !== false) {
+        await rolloverStatelessGroupSession({ agentId: route.agentId, sessionKey: route.sessionKey, log });
       }
 
       log(

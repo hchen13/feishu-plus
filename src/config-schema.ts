@@ -82,6 +82,7 @@ const MilestoneContextSchema = z
     window: z.number().int().positive().optional(),
     maxChars: z.number().int().positive().optional(),
     keep: z.number().int().positive().optional(),
+    model: z.string().optional(),
   })
   .strict()
   .optional();

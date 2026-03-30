@@ -2,9 +2,11 @@ import fs from "fs";
 import path from "path";
 import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk/feishu";
 import { resolveFeishuAccount } from "./accounts.js";
+import { isKnownGroupChat, recordGroupMessageForMilestone } from "./milestone-context.js";
 import { sendMediaFeishu } from "./media.js";
 import { getFeishuRuntime } from "./runtime.js";
 import { sendMarkdownCardFeishu, sendMessageFeishu } from "./send.js";
+import { normalizeFeishuTarget } from "./targets.js";
 
 function normalizePossibleLocalImagePath(text: string | undefined): string | null {
   const raw = text?.trim();
@@ -81,6 +83,55 @@ export const feishuOutbound: ChannelOutboundAdapter = {
   chunker: (text, limit) => getFeishuRuntime().channel.text.chunkMarkdownText(text, limit),
   chunkerMode: "markdown",
   textChunkLimit: 4000,
+  /**
+   * Called by the core with the full (pre-chunked) text when no media is present.
+   * We record the complete message in GroupSense here (before chunking) so that
+   * proactive bot sends via the Message tool are captured for milestone context.
+   */
+  sendFormattedText: async ({ cfg, to, text, accountId, replyToId, threadId, identity }) => {
+    // Record full text in GroupSense only for confirmed group chats.
+    // isKnownGroupChat is populated when inbound group messages are processed (chatType === "group"
+    // from the Feishu webhook), matching the same truth source as the existing inbound recording.
+    const normalizedTo = normalizeFeishuTarget(to) ?? to.trim();
+    if (isKnownGroupChat(normalizedTo)) {
+      try {
+        const account = resolveFeishuAccount({ cfg, accountId: accountId ?? undefined });
+        const milestoneConfig = (account.config as { milestoneContext?: unknown })
+          .milestoneContext as
+          | { enabled?: boolean; window?: number; maxChars?: number; keep?: number; model?: string }
+          | undefined;
+        const messageId = `bot-out:${normalizedTo}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+        void recordGroupMessageForMilestone({
+          chatId: normalizedTo,
+          messageId,
+          sender: identity?.name ?? "[Bot]",
+          body: text,
+          config: milestoneConfig,
+        }).catch((err) =>
+          console.warn("[milestone] failed to record outbound message to GroupSense:", err),
+        );
+      } catch (err) {
+        console.warn("[milestone] error setting up outbound GroupSense recording:", err);
+      }
+    }
+
+    // Chunk and send, replicating core's sendTextChunks behavior.
+    const replyToMessageId = resolveReplyToMessageId({ replyToId, threadId });
+    const runtime = getFeishuRuntime();
+    const chunks = runtime.channel.text.chunkMarkdownText(text, 4000);
+    const results: Array<{ channel: "feishu"; messageId: string; chatId?: string }> = [];
+    for (const chunk of chunks) {
+      const result = await sendOutboundText({
+        cfg,
+        to,
+        text: chunk,
+        accountId: accountId ?? undefined,
+        replyToMessageId,
+      });
+      results.push({ channel: "feishu", ...result });
+    }
+    return results;
+  },
   sendText: async ({ cfg, to, text, accountId, replyToId, threadId, mediaLocalRoots }) => {
     const replyToMessageId = resolveReplyToMessageId({ replyToId, threadId });
     // Scheme A compatibility shim:

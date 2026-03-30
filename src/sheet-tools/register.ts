@@ -81,5 +81,5 @@ export function registerFeishuSheetTools(api: OpenClawPluginApi) {
     { name: "feishu_sheet" },
   );
 
-  api.logger.debug?.("feishu_sheet: Registered feishu_sheet tool");
+  api.logger.info?.("feishu_sheet: Registered feishu_sheet tool");
 }

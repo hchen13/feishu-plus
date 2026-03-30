@@ -101,5 +101,5 @@ export function registerFeishuTaskTools(api: OpenClawPluginApi) {
     run: (client, params) => updateTask(client, params),
   });
 
-  api.logger.debug?.("feishu_task: Registered 4 task tools");
+  api.logger.info?.("feishu_task: Registered 4 task tools");
 }

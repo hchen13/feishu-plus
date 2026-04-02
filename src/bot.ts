@@ -12,6 +12,7 @@ import {
   resolveDefaultGroupPolicy,
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/feishu";
+import { getGlobalHookRunner } from "openclaw/plugin-sdk/plugin-runtime";
 import { resolveFeishuAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { finalizeFeishuMessageProcessing, tryRecordMessagePersistent } from "./dedup.js";
@@ -1616,6 +1617,14 @@ export async function handleFeishuMessage(params: {
               mentionTargets: ctx.mentionTargets,
               accountId: account.accountId,
               messageCreateTimeMs,
+              onStreamingFinalText: async (text) => {
+                const hookRunner = getGlobalHookRunner();
+                if (!hookRunner?.hasHooks("message_sending")) return;
+                await hookRunner.runMessageSending(
+                  { to: ctx.chatId, content: text, metadata: { channel: "feishu", streaming: true } },
+                  { channelId: "feishu", accountId: account.accountId, conversationId: ctx.chatId, sessionKey: agentSessionKey },
+                );
+              },
             });
 
             log(
@@ -1728,6 +1737,14 @@ export async function handleFeishuMessage(params: {
         mentionTargets: ctx.mentionTargets,
         accountId: account.accountId,
         messageCreateTimeMs,
+        onStreamingFinalText: async (text) => {
+          const hookRunner = getGlobalHookRunner();
+          if (!hookRunner?.hasHooks("message_sending")) return;
+          await hookRunner.runMessageSending(
+            { to: ctx.chatId, content: text, metadata: { channel: "feishu", streaming: true } },
+            { channelId: "feishu", accountId: account.accountId, conversationId: ctx.chatId, sessionKey: route.sessionKey },
+          );
+        },
       });
 
       log(`feishu[${account.accountId}]: dispatching to agent (session=${route.sessionKey})`);

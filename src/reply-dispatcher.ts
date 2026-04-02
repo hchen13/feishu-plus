@@ -55,6 +55,11 @@ export type CreateFeishuReplyDispatcherParams = {
   /** Epoch ms when the inbound message was created. Used to suppress typing
    *  indicators on old/replayed messages after context compaction (#30418). */
   messageCreateTimeMs?: number;
+  /** Called with the final text before a streaming card is closed.
+   *  Allows hooks (e.g. promise guard) to inspect content that would otherwise
+   *  bypass the message_sending hook. The streaming card is always delivered —
+   *  this callback is for observation/side-effects only, NOT cancellation. */
+  onStreamingFinalText?: (text: string) => Promise<void>;
 };
 
 export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherParams) {
@@ -427,6 +432,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             if (info?.kind === "final") {
               const finalText = mergeStreamingText(streamText, text);
               streamText = finalText;
+              // Notify hooks before closing — streaming content is already visible
+              // to the user so this is observation-only (no cancellation).
+              await params.onStreamingFinalText?.(finalText);
               await closeStreaming();
               deliveredFinalTexts.add(text);
               await recordAgentReplyToMilestone(finalText);

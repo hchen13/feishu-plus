@@ -13,6 +13,7 @@ import { registerFeishuTaskTools } from "./src/task.js";
 import { registerFeishuSheetTools } from "./src/sheet.js";
 import { registerFeishuIdTools } from "./src/id-index.js";
 import { registerFeishuIdAdminTools } from "./src/id-index-admin.js";
+import { registerFeishuGroupContextTool } from "./src/group-context.js";
 
 export { monitorFeishuProvider } from "./src/monitor.js";
 export {
@@ -84,6 +85,7 @@ const plugin = {
     registerFeishuSheetTools(api);
     registerFeishuIdTools(api);
     registerFeishuIdAdminTools(api);
+    registerFeishuGroupContextTool(api);
   },
 };
 

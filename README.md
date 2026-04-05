@@ -284,7 +284,32 @@ Format is `provider/modelId`. If the LLM call fails, the plugin falls back to a 
 - `renderMode: "card"` always uses interactive markdown cards and gives the clearest streaming-card behavior.
 - `streaming: true` enables the Feishu Card Kit streaming path for that account. It does **not** guarantee a smooth typewriter effect by itself; visible smoothness still depends on how often upstream partial text arrives.
 - This fork explicitly sets `disableBlockStreaming: true` for Feishu replies so OpenClaw block flushes do not prematurely close the streaming card.
-- **Live reasoning display** — when `streaming: true`, the card includes a collapsible "Reasoning" panel that shows live model thinking. To actually light it up, the agent must be configured with `reasoningDefault: "stream"` (per agent in `agents.list`). Without that, the panel stays empty because the SDK defaults to `reasoningLevel: "on"` or `"off"`, which do not emit through the plugin's `onReasoningStream` callback. The panel auto-collapses the moment the model starts producing its answer.
+- **Live reasoning display** — when `streaming: true`, the card includes a collapsible "Reasoning" panel that shows live model thinking, auto-collapsing the moment the model starts producing its answer. Two conditions must both hold for the panel to light up:
+  1. The agent's model must support reasoning (e.g. Claude Opus/Sonnet 4.x, gpt-5.x, GLM-5). Check `models.providers[*].models[*].reasoning: true` in your config.
+  2. The agent must be configured with `reasoningDefault: "stream"` in `agents.list[]`. This is a **per-agent** field — OpenClaw's current schema does not accept `agents.defaults.reasoningDefault`, so there is no true global toggle; you have to set it on every agent you want it on.
+
+  Example (add one line per agent that should stream reasoning):
+
+  ```json
+  {
+    "agents": {
+      "list": [
+        {
+          "id": "main",
+          "name": "…",
+          "workspace": "…",
+          "reasoningDefault": "stream"
+        }
+      ]
+    }
+  }
+  ```
+
+  Accepted values: `"off"` (no reasoning), `"on"` (reasoning requested from the model but not streamed to the card — the panel stays empty), `"stream"` (reasoning streamed via the plugin's `onReasoningStream` callback). Only `"stream"` lights up the panel; without it the reasoning is either discarded entirely (`"off"`, the default when unset) or returned in a form the plugin does not forward.
+
+  Tip: agents whose output never reaches a human reader (e.g. a `summarizer` that just writes to disk) gain nothing from `"stream"` and will burn extra tokens — leave those agents on the default.
+
+  Reload: restart the gateway after editing the config (`openclaw gateway restart`). The gateway reads `agents.list` at startup and does not hot-reload it.
 
 Practical reading:
 

@@ -222,7 +222,9 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
   it("requests streamed reasoning when card streaming is enabled", () => {
     const { result } = createDispatcherHarness();
 
-    expect(result.replyOptions).toHaveProperty("reasoningLevel", "stream");
+    // Note: reasoningLevel is not part of GetReplyOptions; actual reasoning
+    // mode is resolved from agent.reasoningDefault / directives / session.
+    // We only provide the callback here.
     expect(result.replyOptions.onReasoningStream).toEqual(expect.any(Function));
   });
 
@@ -235,7 +237,6 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       chatId: "oc_chat",
     });
 
-    expect(result.replyOptions.reasoningLevel).toBeUndefined();
     expect(result.replyOptions.onReasoningStream).toBeUndefined();
     expect(options).toBeTruthy();
   });
@@ -279,11 +280,15 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
 
     expect(streamingInstances).toHaveLength(1);
     expect(streamingInstances[0].start).toHaveBeenCalledTimes(1);
-    expect(streamingInstances[0].start).toHaveBeenCalledWith("oc_chat", "chat_id", {
-      replyToMessageId: undefined,
-      replyInThread: undefined,
-      rootId: "om_root_topic",
-    });
+    expect(streamingInstances[0].start).toHaveBeenCalledWith(
+      "oc_chat",
+      "chat_id",
+      expect.objectContaining({
+        replyToMessageId: undefined,
+        replyInThread: undefined,
+        rootId: "om_root_topic",
+      }),
+    );
     expect(streamingInstances[0].close).toHaveBeenCalledTimes(1);
     expect(sendMessageFeishuMock).not.toHaveBeenCalled();
     expect(sendMarkdownCardFeishuMock).not.toHaveBeenCalled();
@@ -608,10 +613,14 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     await options.deliver({ text: "```ts\nconst x = 1\n```" }, { kind: "final" });
 
     expect(streamingInstances).toHaveLength(1);
-    expect(streamingInstances[0].start).toHaveBeenCalledWith("oc_chat", "chat_id", {
-      replyToMessageId: "om_msg",
-      replyInThread: true,
-    });
+    expect(streamingInstances[0].start).toHaveBeenCalledWith(
+      "oc_chat",
+      "chat_id",
+      expect.objectContaining({
+        replyToMessageId: "om_msg",
+        replyInThread: true,
+      }),
+    );
   });
 
   it("disables streaming for thread replies and keeps reply metadata", async () => {

@@ -147,9 +147,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   // Card streaming may miss thread affinity in topic contexts; use direct replies there.
   const streamingEnabled =
     !threadReplyMode && account.config?.streaming !== false && renderMode !== "raw";
-  // OpenClaw currently advertises reasoning stream as Telegram-only; enabling
-  // it for Feishu hijacks message handling without producing usable deltas.
-  const reasoningStreamingEnabled = false;
+  // Enable reasoning stream so the streaming card shows live model thinking
+  // in a collapsible panel (folded on answer start). SDK emits full formatted
+  // snapshots via onReasoningStream; queueReasoningUpdate merges them with
+  // mergeStreamingText and pushes to Feishu via streaming.updateReasoning.
+  const reasoningStreamingEnabled = streamingEnabled;
 
   let streaming: FeishuStreamingSession | null = null;
   let streamText = "";
@@ -246,6 +248,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     if (!nextText) {
       return;
     }
+    // Reasoning flowing in is an explicit signal to render a card. In auto
+    // mode, onReplyStart does not start streaming; without this call, the
+    // reasoning would buffer into streamReasoningText, never get flushed,
+    // and be silently dropped if the final answer is plain text.
+    startStreaming();
     if (nextText === lastReasoningPartial) {
       return;
     }
@@ -502,6 +509,20 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       ...replyOptions,
       onModelSelected: prefixContext.onModelSelected,
       disableBlockStreaming: true,
+      // Note: `reasoningLevel` is NOT on GetReplyOptions — it is resolved from
+      // directives / sessionEntry / agentEntry.reasoningDefault / model default.
+      // Users must set `reasoningDefault: "stream"` on their agent config for
+      // reasoning to actually stream into our card. Providing onReasoningStream
+      // here is necessary but not sufficient.
+      onReasoningStream: reasoningStreamingEnabled
+        ? (payload: ReplyPayload) => {
+            if (!payload.text) {
+              return;
+            }
+            reasoningEventCount += 1;
+            queueReasoningUpdate(payload.text);
+          }
+        : undefined,
       onPartialReply: streamingEnabled
         ? (payload: ReplyPayload) => {
             if (!payload.text) {

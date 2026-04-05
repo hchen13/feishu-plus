@@ -183,10 +183,15 @@ function buildStreamingCardJson(options?: StreamingStartOptions): Record<string,
       ],
     });
   }
+  // Always seed the answer slot with a visible placeholder. If reasoning
+  // starts streaming first, it fills the panel above without removing the
+  // placeholder; the first answer delta overwrites the placeholder anyway.
+  // Without this fallback, non-reasoning models + reasoningDefault:"stream"
+  // render an empty card until the answer arrives.
   elements.push({
     tag: "markdown",
     element_id: ANSWER_ELEMENT_ID,
-    content: showReasoningPanel ? "" : STREAMING_PLACEHOLDER_TEXT,
+    content: STREAMING_PLACEHOLDER_TEXT,
   });
 
   const cardJson: Record<string, unknown> = {

@@ -285,6 +285,7 @@ GroupSense 使用 OpenClaw plugin-sdk 的 `agent-runtime` API（`prepareSimpleCo
 - `renderMode: "card"` 会始终使用 interactive markdown card，也是 streaming-card 观感最清晰的模式。
 - `streaming: true` 是给这个账号打开 Feishu Card Kit streaming 路径。它**不等于**一定会有理想的打字机效果；最终观感还取决于上游 partial 文本到底多久来一次。
 - 这个 fork 已经对 Feishu reply 明确设置了 `disableBlockStreaming: true`，避免 OpenClaw block flush 把 streaming card 提前关掉。
+- **实时 reasoning 展示** —— `streaming: true` 时卡片顶部会带一个可折叠的 "Reasoning" 面板，实时展示模型的思考内容。要真正点亮这个面板，还需要在 `agents.list` 里给对应 agent 配 `reasoningDefault: "stream"`。不配的话 SDK 默认走 `reasoningLevel: "on"` 或 `"off"`，思考内容不会通过插件的 `onReasoningStream` 回调吐出来，面板就一直是空的。模型开始产出答案时 reasoning 面板会自动折叠。
 
 经验上可以这样理解：
 

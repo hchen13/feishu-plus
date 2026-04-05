@@ -284,6 +284,7 @@ Format is `provider/modelId`. If the LLM call fails, the plugin falls back to a 
 - `renderMode: "card"` always uses interactive markdown cards and gives the clearest streaming-card behavior.
 - `streaming: true` enables the Feishu Card Kit streaming path for that account. It does **not** guarantee a smooth typewriter effect by itself; visible smoothness still depends on how often upstream partial text arrives.
 - This fork explicitly sets `disableBlockStreaming: true` for Feishu replies so OpenClaw block flushes do not prematurely close the streaming card.
+- **Live reasoning display** — when `streaming: true`, the card includes a collapsible "Reasoning" panel that shows live model thinking. To actually light it up, the agent must be configured with `reasoningDefault: "stream"` (per agent in `agents.list`). Without that, the panel stays empty because the SDK defaults to `reasoningLevel: "on"` or `"off"`, which do not emit through the plugin's `onReasoningStream` callback. The panel auto-collapses the moment the model starts producing its answer.
 
 Practical reading:
 

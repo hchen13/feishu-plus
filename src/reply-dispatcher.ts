@@ -165,6 +165,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   const deliveredStreamingTexts: string[] = [];
   let partialUpdateQueue: Promise<void> = Promise.resolve();
   let streamingStartPromise: Promise<void> | null = null;
+  // Reentrant guard for closeStreaming: onError and onIdle can both invoke
+  // close in quick succession, and under race conditions a second caller
+  // could re-run the body and emit duplicate logs or double-reset state.
+  // Sharing the same in-flight promise ensures the body runs once and every
+  // caller awaits the same completion.
+  let closeStreamingPromise: Promise<void> | null = null;
   let finalReplyMessageId: string | null = null;
   let finalReplyRecorded = false;
   let replyCycleActive = false;
@@ -307,39 +313,64 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     })();
   };
 
-  const closeStreaming = async () => {
-    if (streamingStartPromise) {
-      await streamingStartPromise;
+  const closeStreaming = async (): Promise<void> => {
+    if (closeStreamingPromise) {
+      return closeStreamingPromise;
     }
-    // The embedded runner may enqueue a final reasoning snapshot through an
-    // async wrapper that resumes on the next microtask. Yield once so that
-    // late reasoning updates can join `partialUpdateQueue` before we close
-    // the card and fall back to "No reasoning transcript available."
-    await Promise.resolve();
-    await partialUpdateQueue;
-    if (streaming?.isActive()) {
-      const rawText = streamText;
-      const normalizedRawText = normalizeDeliveredText(rawText);
-      if (normalizedRawText) {
-        deliveredStreamingTexts.push(normalizedRawText);
+    closeStreamingPromise = (async () => {
+      if (streamingStartPromise) {
+        await streamingStartPromise;
       }
-      let text = rawText;
-      if (mentionTargets?.length) {
-        text = buildMentionedCardContent(mentionTargets, text);
+      // The embedded runner may enqueue a final reasoning snapshot through an
+      // async wrapper that resumes on the next microtask. Yield once so that
+      // late reasoning updates can join `partialUpdateQueue` before we close
+      // the card and fall back to "No reasoning transcript available."
+      await Promise.resolve();
+      await partialUpdateQueue;
+      if (streaming?.isActive()) {
+        const rawText = streamText;
+        const normalizedRawText = normalizeDeliveredText(rawText);
+        if (normalizedRawText) {
+          deliveredStreamingTexts.push(normalizedRawText);
+        }
+        let text = rawText;
+        if (mentionTargets?.length) {
+          text = buildMentionedCardContent(mentionTargets, text);
+        }
+        // Orphan-card recovery: if the dispatcher reaches close without any
+        // text ever having flowed through it (streamText stayed empty), the
+        // card is still visually showing its initial "Thinking..." placeholder
+        // because state.answerText is "" server-side and streaming.close("")
+        // would skip the patch (nextAnswerText === state.answerText). This
+        // happens when the agent bypasses the reply dispatcher — e.g. by
+        // calling the `message` tool with filePath+caption, which routes
+        // through the outbound adapter and emits a fully-formed new message
+        // directly. Force the answer element to a minimal marker so the
+        // stale placeholder doesn't linger in the channel.
+        const isOrphan = !text.trim();
+        const effectiveText = isOrphan ? "—" : text;
+        params.runtime.log?.(
+          `feishu[${account.accountId}] closing streaming card: answerChars=${effectiveText.length} reasoningChars=${streamReasoningText.length} reasoningEvents=${reasoningEventCount}${isOrphan ? " (orphan placeholder recovered)" : ""}`,
+        );
+        await streaming.close(effectiveText);
       }
-      params.runtime.log?.(
-        `feishu[${account.accountId}] closing streaming card: answerChars=${text.length} reasoningChars=${streamReasoningText.length} reasoningEvents=${reasoningEventCount}`,
-      );
-      await streaming.close(text);
+      streaming = null;
+      streamingStartPromise = null;
+      streamText = "";
+      streamReasoningText = "";
+      lastPartial = "";
+      lastReasoningPartial = "";
+      reasoningEventCount = 0;
+      reasoningCollapsed = false;
+    })();
+    try {
+      await closeStreamingPromise;
+    } finally {
+      // Allow the next reply cycle to start fresh. Clearing here means a
+      // later call after a clean close can still run the body — but by then
+      // `streaming` is null so the `isActive()` branch short-circuits.
+      closeStreamingPromise = null;
     }
-    streaming = null;
-    streamingStartPromise = null;
-    streamText = "";
-    streamReasoningText = "";
-    lastPartial = "";
-    lastReasoningPartial = "";
-    reasoningEventCount = 0;
-    reasoningCollapsed = false;
   };
 
   const sendChunkedTextReply = async (params: {

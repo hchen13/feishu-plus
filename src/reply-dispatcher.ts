@@ -149,8 +149,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     !threadReplyMode && account.config?.streaming !== false && renderMode !== "raw";
   // Enable reasoning stream so the streaming card shows live model thinking
   // in a collapsible panel (folded on answer start). SDK emits full formatted
-  // snapshots via onReasoningStream; queueReasoningUpdate merges them with
-  // mergeStreamingText and pushes to Feishu via streaming.updateReasoning.
+  // snapshots via onReasoningStream; queueReasoningUpdate replaces state
+  // directly (see that function for why merging is wrong here) and pushes
+  // the snapshot to Feishu via streaming.updateReasoning.
   const reasoningStreamingEnabled = streamingEnabled;
 
   let streaming: FeishuStreamingSession | null = null;
@@ -257,7 +258,15 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       return;
     }
     lastReasoningPartial = nextText;
-    streamReasoningText = mergeStreamingText(streamReasoningText, nextText);
+    // The SDK emits FULL formatted snapshots via onReasoningStream (each call
+    // contains the complete reasoning-to-date, not a delta). mergeStreamingText
+    // is the wrong tool here: its startsWith heuristic fails because the
+    // formatter wraps growing content in `_..._`, so snapshot N+1 is not a
+    // strict prefix of snapshot N (the trailing `_` shifts with every token).
+    // The fallback branch then concatenates them into a cascading chain like
+    // `Reasoning:\n_I_Reasoning:\n_I think_Reasoning:\n_I think the_...`.
+    // Replace the state directly instead.
+    streamReasoningText = nextText;
     partialUpdateQueue = partialUpdateQueue.then(async () => {
       if (streamingStartPromise) {
         await streamingStartPromise;

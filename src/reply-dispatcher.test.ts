@@ -484,6 +484,42 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     expect(streamingInstances[0].close).toHaveBeenCalledWith("最终答案");
   });
 
+  it("replaces reasoning on each snapshot rather than concatenating italic-wrapped cascades", async () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "card",
+        streaming: true,
+      },
+    });
+
+    const { result, options } = createDispatcherHarness({
+      runtime: createRuntimeLogger(),
+    });
+    await options.onReplyStart?.();
+    // SDK emits full formatted snapshots. The trailing `_` wrapper shifts on
+    // every token, so snapshot N+1 is not a strict prefix of snapshot N.
+    // mergeStreamingText's fallback branch would concatenate these into a
+    // cascading chain; queueReasoningUpdate must replace state directly.
+    await result.replyOptions.onReasoningStream?.({ text: "Reasoning:\n_I_" } as never);
+    await result.replyOptions.onReasoningStream?.({ text: "Reasoning:\n_I think_" } as never);
+    await result.replyOptions.onReasoningStream?.({ text: "Reasoning:\n_I think the_" } as never);
+    await options.onIdle?.();
+
+    expect(streamingInstances).toHaveLength(1);
+    const updateReasoningCalls = (streamingInstances[0].updateReasoning as ReturnType<typeof vi.fn>).mock.calls;
+    // Every call must be the raw snapshot, never a concatenated cascade.
+    for (const [arg] of updateReasoningCalls) {
+      expect(arg).not.toContain("_I_Reasoning:");
+      expect(arg).not.toContain("_I think_Reasoning:");
+    }
+    // Last call should be the final snapshot verbatim.
+    expect(updateReasoningCalls.at(-1)?.[0]).toBe("Reasoning:\n_I think the_");
+  });
+
   it("waits one microtask for late reasoning snapshots before streaming close", async () => {
     resolveFeishuAccountMock.mockReturnValue({
       accountId: "main",

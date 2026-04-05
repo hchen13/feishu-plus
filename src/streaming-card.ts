@@ -486,11 +486,16 @@ export class FeishuStreamingSession {
     if (!this.state || this.closed || !this.state.showReasoningPanel) {
       return;
     }
-    const mergedInput = mergeStreamingText(this.pendingReasoningText ?? this.state.reasoningText, text);
-    if (!mergedInput || mergedInput === this.state.reasoningText) {
+    // Reasoning callers feed us full formatted snapshots (see the detailed
+    // note in reply-dispatcher.ts queueReasoningUpdate). Do NOT run these
+    // through mergeStreamingText — the SDK formatter wraps each line in
+    // `_..._`, so snapshot N+1 is not a strict prefix of snapshot N and the
+    // merger's fallback branch concatenates them into a cascading chain.
+    // Treat each incoming text as the authoritative full reasoning state.
+    if (!text || text === this.state.reasoningText) {
       return;
     }
-    this.pendingReasoningText = mergedInput;
+    this.pendingReasoningText = text;
     if (this.pendingReasoningExpanded !== true && this.state.reasoningExpanded === false) {
       this.pendingReasoningExpanded = true;
     }

@@ -1,4 +1,4 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static, type TObject, type TProperties, type TUnion } from "@sinclair/typebox";
 
 const AccountIdField = Type.Optional(
   Type.String({
@@ -52,9 +52,20 @@ const FeishuDriveActions = Type.Union([
   }),
 ]);
 
-export const FeishuDriveSchema = Type.Intersect([
-  FeishuDriveActions,
-  Type.Object({ accountId: AccountIdField }),
-]);
+// See doc-schema.ts for the rationale: we emit anyOf of flat objects instead
+// of Type.Intersect to avoid OpenAI rejecting top-level allOf, and the cast
+// preserves per-variant discriminated-union narrowing in drive.ts.
+type InjectAccountId<V> = V extends TObject<infer P>
+  ? TObject<P & { accountId: typeof AccountIdField }>
+  : never;
+type WithAccountIdVariants<T extends readonly TObject<TProperties>[]> = {
+  [K in keyof T]: InjectAccountId<T[K]>;
+};
+
+export const FeishuDriveSchema = Type.Union(
+  FeishuDriveActions.anyOf.map((variant) =>
+    Type.Object({ ...variant.properties, accountId: AccountIdField }),
+  ),
+) as unknown as TUnion<WithAccountIdVariants<typeof FeishuDriveActions.anyOf>>;
 
 export type FeishuDriveParams = Static<typeof FeishuDriveSchema>;

@@ -1,4 +1,4 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static, type TObject, type TProperties, type TUnion } from "@sinclair/typebox";
 
 const AccountIdField = Type.Optional(
   Type.String({
@@ -58,9 +58,20 @@ const FeishuPermActions = Type.Union([
   }),
 ]);
 
-export const FeishuPermSchema = Type.Intersect([
-  FeishuPermActions,
-  Type.Object({ accountId: AccountIdField }),
-]);
+// See doc-schema.ts for the rationale: we emit anyOf of flat objects instead
+// of Type.Intersect to avoid OpenAI rejecting top-level allOf, and the cast
+// preserves per-variant discriminated-union narrowing in perm.ts.
+type InjectAccountId<V> = V extends TObject<infer P>
+  ? TObject<P & { accountId: typeof AccountIdField }>
+  : never;
+type WithAccountIdVariants<T extends readonly TObject<TProperties>[]> = {
+  [K in keyof T]: InjectAccountId<T[K]>;
+};
+
+export const FeishuPermSchema = Type.Union(
+  FeishuPermActions.anyOf.map((variant) =>
+    Type.Object({ ...variant.properties, accountId: AccountIdField }),
+  ),
+) as unknown as TUnion<WithAccountIdVariants<typeof FeishuPermActions.anyOf>>;
 
 export type FeishuPermParams = Static<typeof FeishuPermSchema>;

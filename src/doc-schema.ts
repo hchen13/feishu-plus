@@ -1,4 +1,4 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static, type TObject, type TProperties, type TUnion } from "@sinclair/typebox";
 
 const AccountIdField = Type.Optional(
   Type.String({
@@ -188,9 +188,29 @@ export const FeishuDocSchema = Type.Union([
   }),
 ], { description: "Action-specific parameters" });
 
-export const FeishuDocSchemaWithAccount = Type.Intersect([
-  FeishuDocSchema,
-  Type.Object({ accountId: AccountIdField }),
-]);
+// We emit `anyOf` of flat object variants instead of `Type.Intersect([...])`.
+// Why: OpenClaw's normalizeToolParameterSchema explicitly refuses to flatten
+// top-level `allOf` (which is what Type.Intersect produces), and OpenAI rejects
+// top-level `allOf` outright (`invalid schema for function`). The normalizer
+// DOES flatten `anyOf` of flat objects into a single merged `type: "object"`,
+// which every provider accepts. Do not revert to Type.Intersect.
+//
+// The `as unknown as TUnion<...>` cast preserves TypeScript's per-variant
+// discriminated union narrowing that `.map(...)` would otherwise collapse to a
+// permissive `any`-index signature, breaking `switch (p.action)` type safety in
+// docx.ts.
+type InjectAccountId<V> = V extends TObject<infer P>
+  ? TObject<P & { accountId: typeof AccountIdField }>
+  : never;
+type WithAccountIdVariants<T extends readonly TObject<TProperties>[]> = {
+  [K in keyof T]: InjectAccountId<T[K]>;
+};
+
+export const FeishuDocSchemaWithAccount = Type.Union(
+  FeishuDocSchema.anyOf.map((variant) =>
+    Type.Object({ ...variant.properties, accountId: AccountIdField }),
+  ),
+  { description: FeishuDocSchema.description },
+) as unknown as TUnion<WithAccountIdVariants<typeof FeishuDocSchema.anyOf>>;
 
 export type FeishuDocParams = Static<typeof FeishuDocSchemaWithAccount>;

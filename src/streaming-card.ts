@@ -14,7 +14,14 @@ type CardState = {
   answerText: string;
   reasoningText: string;
   reasoningExpanded: boolean;
+  /** Whether this card was opened with reasoning support enabled at all. */
   showReasoningPanel: boolean;
+  /** Whether the collapsible reasoning panel has actually been inserted into
+   * the live card. The panel is added lazily on the first reasoning event so
+   * that users never see an empty "Reasoning" frame when the model produces
+   * no thinking tokens (e.g. OpenAI models that only return encrypted
+   * reasoning summaries, or trivial prompts the model short-circuits). */
+  reasoningPanelAdded: boolean;
 };
 
 /** Optional header for streaming cards (title bar with color template) */
@@ -157,37 +164,44 @@ export function resolveStreamingCardSendMode(options?: StreamingStartOptions) {
   return "create";
 }
 
-function buildStreamingCardJson(options?: StreamingStartOptions): Record<string, unknown> {
-  const showReasoningPanel = options?.showReasoningPanel === true;
-  const elements: Record<string, unknown>[] = [];
-  if (showReasoningPanel) {
-    elements.push({
-      tag: "collapsible_panel",
-      element_id: REASONING_PANEL_ELEMENT_ID,
-      expanded: false,
-      background_color: "grey-50",
-      padding: "4px 12px 12px 12px",
-      vertical_spacing: "4px",
-      header: {
-        title: { tag: "plain_text", content: "Reasoning" },
-        background_color: "grey-100",
-        padding: "8px 12px 8px 12px",
+/** Reasoning panel element JSON, reused for both initial embedding (unused
+ * now that the panel is lazy) and for runtime insertion via the Card Kit
+ * `elements` POST API. */
+function buildReasoningPanelElement(): Record<string, unknown> {
+  return {
+    tag: "collapsible_panel",
+    element_id: REASONING_PANEL_ELEMENT_ID,
+    expanded: true,
+    background_color: "grey-50",
+    padding: "4px 12px 12px 12px",
+    vertical_spacing: "4px",
+    header: {
+      title: { tag: "plain_text", content: "Reasoning" },
+      background_color: "grey-100",
+      padding: "8px 12px 8px 12px",
+    },
+    elements: [
+      {
+        tag: "markdown",
+        element_id: REASONING_ELEMENT_ID,
+        content: "",
+        text_size: "notation",
       },
-      elements: [
-        {
-          tag: "markdown",
-          element_id: REASONING_ELEMENT_ID,
-          content: "",
-          text_size: "notation",
-        },
-      ],
-    });
-  }
-  // Always seed the answer slot with a visible placeholder. If reasoning
-  // starts streaming first, it fills the panel above without removing the
-  // placeholder; the first answer delta overwrites the placeholder anyway.
-  // Without this fallback, non-reasoning models + reasoningDefault:"stream"
-  // render an empty card until the answer arrives.
+    ],
+  };
+}
+
+function buildStreamingCardJson(options?: StreamingStartOptions): Record<string, unknown> {
+  // The reasoning panel is NEVER included in the initial card anymore, even
+  // when showReasoningPanel is enabled. It is inserted lazily on the first
+  // reasoning stream event (see ensureReasoningPanelAdded). This prevents
+  // users from ever seeing an empty "Reasoning" frame when the model returns
+  // no thinking tokens — which is the common case for OpenAI reasoning models
+  // that only return encrypted reasoning summaries, or for trivial prompts
+  // the model short-circuits.
+  const elements: Record<string, unknown>[] = [];
+  // Always seed the answer slot with a visible placeholder; the first answer
+  // delta overwrites it.
   elements.push({
     tag: "markdown",
     element_id: ANSWER_ELEMENT_ID,
@@ -323,15 +337,16 @@ export class FeishuStreamingSession {
       sequence: 1,
       answerText: "",
       reasoningText: "",
-      reasoningExpanded: false,
+      reasoningExpanded: true,
       showReasoningPanel: options?.showReasoningPanel === true,
+      reasoningPanelAdded: false,
     };
     this.log?.(`Started streaming: cardId=${cardId}, messageId=${sendRes.data.message_id}`);
   }
 
   private async requestCardApi(params: {
     path: string;
-    method: "PATCH" | "PUT";
+    method: "PATCH" | "PUT" | "POST";
     body: Record<string, unknown>;
     auditContext: string;
   }): Promise<void> {
@@ -402,6 +417,40 @@ export class FeishuStreamingSession {
     }).catch((error) => onError?.(error));
   }
 
+  /** Insert the reasoning collapsible panel into a live card, before the
+   * answer element, exactly once. Subsequent calls are no-ops. Users should
+   * only see a "Reasoning" frame when the model is actually producing
+   * thinking content — never as a pre-allocated empty stub.  */
+  private async ensureReasoningPanelAdded(): Promise<void> {
+    if (!this.state || this.closed) {
+      return;
+    }
+    if (!this.state.showReasoningPanel || this.state.reasoningPanelAdded) {
+      return;
+    }
+    this.state.reasoningPanelAdded = true;
+    this.state.sequence += 1;
+    try {
+      await this.requestCardApi({
+        path: `/cardkit/v1/cards/${this.state.cardId}/elements`,
+        method: "POST",
+        body: {
+          type: "insert_before",
+          target_element_id: ANSWER_ELEMENT_ID,
+          elements: JSON.stringify([buildReasoningPanelElement()]),
+          sequence: this.state.sequence,
+          uuid: `a_${this.state.cardId}_reasoning_${this.state.sequence}`,
+        },
+        auditContext: "feishu.streaming-card.add-reasoning-panel",
+      });
+    } catch (error) {
+      // Roll back the flag so a later call could retry — but log it so we
+      // don't silently lose reasoning events.
+      this.state.reasoningPanelAdded = false;
+      this.log?.(`Add reasoning panel failed: ${String(error)}`);
+    }
+  }
+
   private async flushPendingUpdates(force = false): Promise<void> {
     if (!this.state || this.closed) {
       return;
@@ -432,8 +481,12 @@ export class FeishuStreamingSession {
         return;
       }
 
+      // Reasoning element patches/content updates only make sense when the
+      // panel has actually been inserted into the live card. Until then both
+      // REASONING_PANEL_ELEMENT_ID and REASONING_ELEMENT_ID don't exist
+      // server-side, so patching them would 404.
       if (
-        this.state.showReasoningPanel &&
+        this.state.reasoningPanelAdded &&
         nextReasoningExpanded !== null &&
         nextReasoningExpanded !== this.state.reasoningExpanded
       ) {
@@ -446,7 +499,7 @@ export class FeishuStreamingSession {
       }
 
       if (
-        this.state.showReasoningPanel &&
+        this.state.reasoningPanelAdded &&
         nextReasoningText !== null &&
         nextReasoningText !== this.state.reasoningText
       ) {
@@ -495,15 +548,22 @@ export class FeishuStreamingSession {
     if (!text || text === this.state.reasoningText) {
       return;
     }
-    this.pendingReasoningText = text;
-    if (this.pendingReasoningExpanded !== true && this.state.reasoningExpanded === false) {
-      this.pendingReasoningExpanded = true;
+    // Lazy insertion: only add the reasoning panel to the card on the first
+    // real reasoning arrival. This avoids the "empty Reasoning frame" UX
+    // when the model returns no thinking tokens (OpenAI encrypted reasoning,
+    // trivial prompts, etc.).
+    await this.ensureReasoningPanelAdded();
+    if (!this.state.reasoningPanelAdded) {
+      // Panel insertion failed; skip the content update to avoid patching a
+      // non-existent element. The failure was already logged.
+      return;
     }
+    this.pendingReasoningText = text;
     await this.flushPendingUpdates();
   }
 
   async collapseReasoning(): Promise<void> {
-    if (!this.state || this.closed || !this.state.showReasoningPanel) {
+    if (!this.state || this.closed || !this.state.reasoningPanelAdded) {
       return;
     }
     if (
@@ -529,11 +589,20 @@ export class FeishuStreamingSession {
     const answerText = finalText ? mergeStreamingText(pendingAnswerMerged, finalText) : pendingAnswerMerged;
 
     this.pendingAnswerText = answerText;
-    if (this.state.showReasoningPanel) {
+    // Only finalize the reasoning panel if it was actually inserted during
+    // the session. Without a physical panel, patching REASONING_ELEMENT_ID
+    // would 404 server-side, and more importantly the UX goal is that users
+    // never see an empty "Reasoning" frame — so we must not leave one behind
+    // at close time either.
+    if (this.state.reasoningPanelAdded) {
       const pendingReasoningMerged = mergeStreamingText(
         this.state.reasoningText,
         this.pendingReasoningText ?? undefined,
       );
+      // If we reach close with the panel added but no pending content, still
+      // fall back to the placeholder rather than leaving the element blank.
+      // (Shouldn't normally happen — the panel is only added on non-empty
+      // reasoning arrival — but keep it as a safety net.)
       const reasoningText = pendingReasoningMerged || REASONING_EMPTY_TEXT;
       this.pendingReasoningText = reasoningText;
       if (answerText && this.state.reasoningExpanded) {

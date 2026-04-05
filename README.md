@@ -305,7 +305,12 @@ Format is `provider/modelId`. If the LLM call fails, the plugin falls back to a 
   }
   ```
 
-  Accepted values: `"off"` (no reasoning), `"on"` (reasoning requested from the model but not streamed to the card — the panel stays empty), `"stream"` (reasoning streamed via the plugin's `onReasoningStream` callback). Only `"stream"` lights up the panel; without it the reasoning is either discarded entirely (`"off"`, the default when unset) or returned in a form the plugin does not forward.
+  Accepted values:
+  - `"off"` — no reasoning requested. Default when unset.
+  - `"on"` — reasoning requested from the model, returned as an **inline reply item** formatted `Reasoning:\n_line1_\n_line2_` and appended to the normal reply stream. This mode is designed for channels without a separate reasoning lane (e.g. plain text output, Discord). In Feishu specifically, the streaming card's collapsible panel ignores this mode because the panel only listens to the `onReasoningStream` callback.
+  - `"stream"` — reasoning streamed via the plugin's `onReasoningStream` callback and rendered into the card's collapsible "Reasoning" panel in real-time. **This is the mode you want for the Feishu card UX.** The panel is inserted lazily on the first reasoning event, so users never see an empty "Reasoning" frame when the model produces no thinking tokens.
+
+  Heads-up for OpenAI reasoning models (`gpt-5.x` via `openai-codex` provider): OpenAI returns reasoning as an **encrypted blob** for server-to-server continuity, not as streamable plaintext thinking tokens. This means even with `reasoningDefault: "stream"` and a live `onReasoningStream` wire, the callback receives little or no content for OpenAI reasoning models — you will see the panel appear only briefly or not at all. **For a visible streaming reasoning experience, use an Anthropic Claude model** (Opus/Sonnet 4.x) with extended thinking enabled; Anthropic streams raw reasoning tokens via `thinking_delta` events, which map directly onto the card's reasoning lane.
 
   Tip: agents whose output never reaches a human reader (e.g. a `summarizer` that just writes to disk) gain nothing from `"stream"` and will burn extra tokens — leave those agents on the default.
 

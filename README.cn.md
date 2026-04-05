@@ -306,7 +306,12 @@ GroupSense 使用 OpenClaw plugin-sdk 的 `agent-runtime` API（`prepareSimpleCo
   }
   ```
 
-  取值含义：`"off"`（不开 reasoning）、`"on"`（开 reasoning 但不流到卡片——面板仍然是空的）、`"stream"`（通过插件的 `onReasoningStream` 回调流到卡片）。只有 `"stream"` 会点亮面板；不设的话默认等价于 `"off"`，reasoning 根本不会产生。
+  三个取值：
+  - `"off"` —— 不请求 reasoning。不设置时的默认值。
+  - `"on"` —— 请求 reasoning，内容作为**独立的回复块**（格式是 `Reasoning:\n_line1_\n_line2_`）拼到主回复流里一起发出去。这个模式是给没有独立 reasoning 通道的渠道用的（纯文本渲染、Discord 等）。飞书卡片的 collapsible reasoning 面板**不会消费这个模式**，因为面板只监听 `onReasoningStream` 回调。
+  - `"stream"` —— reasoning 通过 `onReasoningStream` 回调实时流到卡片的可折叠 "Reasoning" 面板里。**飞书卡片 UX 要用的就是这个。** 面板是懒插入的：只有当第一条 reasoning 真的流过来时才会出现，所以模型没产生 thinking tokens 的时候用户永远不会看到一个空的"Reasoning"框。
+
+  关于 OpenAI 的 reasoning 模型（`openai-codex` provider 下的 `gpt-5.x`）有一个坑：OpenAI 把 reasoning 作为**加密 blob** 回传，用来在多次调用间做服务端侧 reasoning 复用，**不是**可流的明文思考 token。结果就是：即使你设了 `reasoningDefault: "stream"`、`onReasoningStream` callback 也接好了，OpenAI 模型这边 callback 几乎收不到什么内容——面板要么一闪而过要么根本不出现。**想要真正看到实时流 reasoning 的体验，请用 Anthropic Claude 系列**（Opus/Sonnet 4.x 开启 extended thinking）；Anthropic 会通过 `thinking_delta` 事件流出原始 reasoning token，直接映射到卡片的 reasoning 通道上。
 
   提示：如果某个 agent 的输出从来不直接给用户看（比如 `summarizer` 只是把结果写盘），开 `"stream"` 纯属浪费 token —— 保持默认就行。
 

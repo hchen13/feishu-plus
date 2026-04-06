@@ -272,7 +272,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     // The fallback branch then concatenates them into a cascading chain like
     // `Reasoning:\n_I_Reasoning:\n_I think_Reasoning:\n_I think the_...`.
     // Replace the state directly instead.
-    streamReasoningText = nextText;
+    // Strip the "Reasoning:\n" prefix that the SDK's formatReasoningMessage
+    // prepends to every snapshot. The panel already has its own "Thoughts"
+    // header; showing both is visually redundant.
+    streamReasoningText = nextText.startsWith("Reasoning:\n")
+      ? nextText.slice("Reasoning:\n".length)
+      : nextText;
     partialUpdateQueue = partialUpdateQueue.then(async () => {
       if (streamingStartPromise) {
         await streamingStartPromise;

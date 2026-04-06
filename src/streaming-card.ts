@@ -42,7 +42,9 @@ type StreamingStartOptions = {
 const ANSWER_ELEMENT_ID = "content";
 const REASONING_ELEMENT_ID = "reasoning_text";
 const REASONING_PANEL_ELEMENT_ID = "reasoning_panel";
-const REASONING_EMPTY_TEXT = "_No reasoning transcript available._";
+const REASONING_EMPTY_TEXT = "_No thoughts available._";
+const THOUGHTS_EXPANDED_TITLE = "▾ Thoughts";
+const THOUGHTS_COLLAPSED_TITLE = "▸ Thoughts";
 const STREAMING_PLACEHOLDER_TEXT = "⏳ Thinking...";
 
 // Token cache (keyed by domain + appId)
@@ -176,7 +178,7 @@ function buildReasoningPanelElement(): Record<string, unknown> {
     padding: "4px 12px 12px 12px",
     vertical_spacing: "4px",
     header: {
-      title: { tag: "plain_text", content: "Reasoning" },
+      title: { tag: "plain_text", content: THOUGHTS_EXPANDED_TITLE },
       background_color: "grey-100",
       padding: "8px 12px 8px 12px",
     },
@@ -493,7 +495,17 @@ export class FeishuStreamingSession {
         this.state.reasoningExpanded = nextReasoningExpanded;
         await this.patchElement(
           REASONING_PANEL_ELEMENT_ID,
-          { expanded: nextReasoningExpanded },
+          {
+            expanded: nextReasoningExpanded,
+            header: {
+              title: {
+                tag: "plain_text",
+                content: nextReasoningExpanded ? THOUGHTS_EXPANDED_TITLE : THOUGHTS_COLLAPSED_TITLE,
+              },
+              background_color: "grey-100",
+              padding: "8px 12px 8px 12px",
+            },
+          },
           (e) => this.log?.(`Reasoning panel patch failed: ${String(e)}`),
         );
       }

@@ -6,6 +6,10 @@ import path from "node:path";
 type SessionStoreEntry = Record<string, unknown> & {
   sessionId?: string;
   sessionFile?: string;
+  /** Accumulated history of all session files from prior rollovers. The
+   *  current sessionFile is always appended here so tools like session
+   *  transcript search can discover the full conversation lineage. */
+  sessionFiles?: string[];
   chatType?: string;
   systemSent?: boolean;
 };
@@ -79,10 +83,19 @@ export async function rolloverStatelessGroupSession(params: {
   const nextSessionId = randomUUID();
   const sessionsDir = entry.sessionFile ? path.dirname(entry.sessionFile) : path.dirname(storePath);
   const nextSessionFile = path.join(sessionsDir, `${nextSessionId}.jsonl`);
+  // Preserve the outgoing sessionFile in a cumulative sessionFiles array so
+  // session transcript search, milestone context, and other consumers can
+  // discover the full conversation lineage across rollovers.
+  const priorFiles: string[] = entry.sessionFiles?.length
+    ? entry.sessionFiles
+    : entry.sessionFile
+      ? [entry.sessionFile]
+      : [];
   const nextEntry: SessionStoreEntry = {
     ...entry,
     sessionId: nextSessionId,
     sessionFile: nextSessionFile,
+    sessionFiles: [...priorFiles, nextSessionFile],
     updatedAt: Date.now(),
     systemSent: entry.systemSent === false ? false : true,
     abortedLastRun: false,

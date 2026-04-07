@@ -510,6 +510,8 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
   - URL 解析、字段 CRUD、记录 CRUD、批量删除
 - `feishu_task_*`
   - create、get、update、delete
+- `feishu_get_message_file`
+  - 通过 `message_id` + `file_key` 下载任意 image / file / audio / video 附件。PDF 通过自带的 `pdfjs-dist` 抽取文本，图片以原生 image content block 返回，纯文本就地解码内联，office 二进制格式返回明确的"请另存为 PDF"提示。配套的端到端工作流见 [群里发文件不 @bot 也能让 agent 读取](#群里发文件不-bot-也能让-agent-读取)。
 
 敏感能力：
 
@@ -523,6 +525,30 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
 可用性补充：
 
 - 创建文档时，如果希望发起请求的人立刻拿到访问权限，记得传 `owner_open_id`，否则新文档可能只对 bot app 可见
+
+## 群里发文件不 @bot 也能让 Agent 读取
+
+飞书移动端的 UI 不允许在发送文件的同时 `@mention` 任何人——文件消息只能单独发送。所以群里最自然的工作流是：
+
+1. 用户先把 PDF（或图片、文档等）扔进群里，不 `@bot`
+2. 再发一条 `@bot 帮我看看这个 PDF`
+
+`feishu-plus` 通过两个配套改动让这个流程端到端打通：
+
+- **GroupSense 的 pending history 记录结构化的附件标记。** 群里没 mention bot 的消息原本只是被缓存为原始文本进 GroupSense。对于 file / image / audio / video 类型的消息，body 现在会被序列化成 `[feishu_attachment type=file message_id=… key=… name="…"]`，而不是 `{"file_key":"..."}` 的裸 JSON——这样后续轮次能清楚看到群里出现过一个真实的附件，并能引用到它。
+- **`feishu_get_message_file` 按需下载这个被记录的附件。** Agent 真正决定打开文件时，用标记里看到的 `message_id` 和 `file_key` 调这个 tool。整个过程不需要让用户重新上传，也不需要再追问。
+
+按内容类型的处理行为：
+
+| 类型 | 处理方式 |
+| --- | --- |
+| **PDF** | 通过自带的 `pdfjs-dist` 抽取文本（最多 50 页 / 200K 字符），再包进 external-untrusted-content block |
+| **图片**（`png`、`jpg`、`gif`、`webp`、`heic`） | 以原生 image content block 返回。Agent 上任何带视觉能力的模型（Claude、gpt-5.x、GLM-5……）都能直接看 |
+| **纯文本**（`.txt`、`.md`、`.csv`、`.json`、`.log`、`.xml`、各类源代码……） | 按 UTF-8 解码（失败回退 Latin-1），就地内联 |
+| **Office 二进制**（`.docx`、`.xlsx`、`.pptx`、`.doc`、`.xls`、`.ppt`） | 返回明确的"暂不支持，请另存为 PDF 后重新上传"提示，不会装作能读 |
+| **其他格式** | 返回带检测到的 MIME 类型的兜底提示 |
+
+超过 30 MB 的文件会直接拒绝，避免 agent 的上下文窗口被一份大文件吃光。这个 tool 用的 `pdfjs-dist` 本来就是 feishu-plus 的传递依赖——没有新增任何 declared dependency。
 
 ## 给 AI Agents 的部署说明
 

@@ -563,6 +563,40 @@ export function toMessageResourceType(messageType: string): "image" | "file" {
 }
 
 /**
+ * Build a structured history-body entry for a group message when the bot was
+ * not mentioned. For media messages (file/image/audio/video), emits a marker
+ * the agent can later use to fetch the actual content via feishu_get_message_file.
+ *
+ * Plain text / post / share_chat fall back to the raw parsed content, so we
+ * don't change behavior for non-media chatter.
+ */
+function formatGroupHistoryBody(ctx: {
+  contentType: string;
+  content: string;
+  messageId: string;
+  senderName?: string;
+  senderOpenId: string;
+}): string {
+  const speaker = ctx.senderName ?? ctx.senderOpenId;
+  const msgType = ctx.contentType;
+  if (
+    msgType === "file" ||
+    msgType === "image" ||
+    msgType === "audio" ||
+    msgType === "video" ||
+    msgType === "media"
+  ) {
+    const { imageKey, fileKey, fileName } = parseMediaKeys(ctx.content, msgType);
+    const key = imageKey ?? fileKey ?? "";
+    const attrs: string[] = [`type=${msgType}`, `message_id=${ctx.messageId}`];
+    if (key) attrs.push(`key=${key}`);
+    if (fileName) attrs.push(`name=${JSON.stringify(fileName)}`);
+    return `${speaker}: [feishu_attachment ${attrs.join(" ")}]`;
+  }
+  return `${speaker}: ${ctx.content}`;
+}
+
+/**
  * Infer placeholder text based on message type.
  */
 function inferPlaceholder(messageType: string): string {
@@ -1154,7 +1188,7 @@ export async function handleFeishuMessage(params: {
           limit: historyLimit,
           entry: {
             sender: ctx.senderOpenId,
-            body: `${ctx.senderName ?? ctx.senderOpenId}: ${ctx.content}`,
+            body: formatGroupHistoryBody(ctx),
             timestamp: Date.now(),
             messageId: ctx.messageId,
           },

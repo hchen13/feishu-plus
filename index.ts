@@ -14,6 +14,7 @@ import { registerFeishuSheetTools } from "./src/sheet.js";
 import { registerFeishuIdTools } from "./src/id-index.js";
 import { registerFeishuIdAdminTools } from "./src/id-index-admin.js";
 import { registerFeishuGroupContextTool } from "./src/group-context.js";
+import { registerFeishuMessageFileTool } from "./src/message-resource-tool.js";
 
 export { monitorFeishuProvider } from "./src/monitor.js";
 export {
@@ -86,6 +87,7 @@ const plugin = {
     registerFeishuIdTools(api);
     registerFeishuIdAdminTools(api);
     registerFeishuGroupContextTool(api);
+    registerFeishuMessageFileTool(api);
   },
 };
 

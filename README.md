@@ -513,6 +513,8 @@ Local additions or expansions in this fork:
   - resolve (ID conversion across open_id/union_id/user_id/chat_id), lookup (email/phone → IDs), whois (full profile), members (enriched with all ID types), my_chats, search_chats
 - `feishu_id_admin`
   - rebuild_index (scan session history for observed IDs), search_observed (zero-API local search), verify_matrix (cross-account visibility report), explain_visibility (single-target deep diagnosis)
+- `feishu_get_message_file`
+  - downloads any image / file / audio / video attachment by `message_id` + `file_key`. PDFs are extracted to text via the bundled `pdfjs-dist`, images are returned as native image content blocks, plain text is inlined, office binaries return an explicit "convert to PDF" hint. See [Reading files sent without @mention](#reading-files-sent-without-mention) for the cross-message workflow this enables.
 
 Optional sensitive tooling:
 
@@ -526,6 +528,30 @@ Operational note:
 Usability note:
 
 - When creating a document, pass the requester's `owner_open_id` if you want the human requester to immediately receive access on the created doc instead of leaving it visible only to the bot app.
+
+## Reading Files Sent Without @mention
+
+Feishu's mobile UI does not let you attach a file **and** `@mention` the bot in the same message — the file always goes out alone. The natural workflow is therefore:
+
+1. Drop a PDF (or image, doc, etc.) into the group with no `@bot`.
+2. Follow up with a second message: `@bot 帮我看看这个 PDF`.
+
+`feishu-plus` makes this work end-to-end through two coordinated changes:
+
+- **GroupSense pending history records a structured attachment marker.** Group messages that do not mention the bot are normally buffered into GroupSense as raw text. For file / image / audio / video messages, the body is now serialized as `[feishu_attachment type=file message_id=… key=… name="…"]` instead of the raw `{"file_key":"..."}` JSON, so later turns can clearly see that a real attachment existed and reference it.
+- **`feishu_get_message_file` downloads the captured attachment on demand.** When the agent decides to actually open the file, it calls this tool with the `message_id` and `file_key` it sees in the marker. No re-uploading or user prompting needed.
+
+Behavior by content type:
+
+| Type | Handling |
+| --- | --- |
+| **PDF** | Extracted to text via the bundled `pdfjs-dist` (capped at 50 pages / 200K chars) and wrapped in an external-untrusted-content block |
+| **Image** (`png`, `jpg`, `gif`, `webp`, `heic`) | Returned as a native image content block. Any vision-capable model on the agent (Claude, gpt-5.x, GLM-5, …) can read it directly |
+| **Plain text** (`.txt`, `.md`, `.csv`, `.json`, `.log`, `.xml`, source files, …) | Decoded as UTF-8 with Latin-1 fallback, then inlined |
+| **Office binary** (`.docx`, `.xlsx`, `.pptx`, `.doc`, `.xls`, `.ppt`) | Returns an explicit "this format is not supported — please save as PDF and re-upload" message instead of pretending to read the bytes |
+| **Anything else** | Fallback message with the detected MIME type |
+
+Files larger than 30 MB are rejected outright so the agent's context window stays predictable. The tool uses `pdfjs-dist` that is already a transitive dependency — no new dependency is declared.
 
 ## Notes For AI Agents
 

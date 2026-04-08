@@ -535,8 +535,14 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
 
 `feishu-plus` 通过两个配套改动让这个流程端到端打通，而且这两个改动都刻意做成与文件格式无关：
 
-- **GroupSense pending history（以及 milestone summary）记录结构化的附件标记。** 群里没 mention bot 的消息原本只是被缓存为原始文本进 GroupSense。对于带附件的消息——顶层的 `file` / `image` / `audio` / `video` 消息**以及**带嵌入式 image_key / file_key 的富文本 `post` 消息——每一个附件都会被序列化成 `[feishu_attachment type=… message_id=… key=… name="…"]`，而不是 `{"file_key":"..."}` 的裸 JSON。同一份格式化结果同时喂给 milestone-context 摘要器，所以 LLM 在生成 milestone 时也能看到真实的附件引用，而不是看不懂的 JSON。当用户后面再 `@` bot 时，agent 在上下文里就有了一个可引用的"句柄"——并且**插件到此为止没有发起任何网络请求**。完全发生在人类之间的文件传输永远不会触发下载。
-- **`feishu_get_message_file` 按需下载附件。** Agent 真的想看这个文件时，用标记里的 `message_id`、`file_key`，加一个绝对 `save_to` 路径，再加上（建议） `original_filename` 调这个 tool。插件通过飞书 `im.messageResource.get` 拉下字节、写到磁盘——就这些。**没有 PDF 解析、没有 OCR、没有文本解码、没有按 MIME 分支处理。** 调用返回路径之后，agent 自己用 Read / read_file（Claude Code、codex 等都自带）去读内容。
+- **GroupSense 在 history 生命周期的每一层都捕获结构化的附件标记。** 一条群消息携带的每个附件——顶层的 `file` / `image` / `audio` / `video`，加上富文本 `post` 里嵌入的 image_key / file_key——都会被序列化成 `[feishu_attachment type=… message_id=… key=… name="…"]`。这个标记是 agent 唯一可用的"文件句柄"，没有它 agent 只能看到 `{"file_key":"..."}` 这种没意义的 JSON。两层机制保证 marker 不会丢：
+  - **Pending history（最近消息窗口）。** Marker 是 `formatGroupBody` 输出的 body 的一部分，agent 的上下文直接看到它。生命周期：到下一次 milestone 压缩把窗口往前滚为止。
+  - **Milestone summary（压缩后的老历史）。** **在调 LLM 摘要器之前**，一个确定性的正则（`\[feishu_attachment [^\]]+\]`）会把源消息里所有 marker 抠出来，**原文存在 `MilestoneRecord` 上、与 LLM 生成的摘要平级，而不是塞进摘要里**。`buildMilestonePrefix` 把 milestone 渲染回 agent context 时，这些 marker 会出现在自己的 `附件（原文标记）` 块里。LLM 想怎么压缩、改写、丢弃可读文本都可以——附件列表是由代码捕获的，不依赖任何 LLM 可能忽略的指令。Marker 发出时会把文件名里的 `[` 和 `]` strip 掉，避免出现像 `file].pdf` 这种文件名让正则提前截断。
+  - **Retention 模型。** Attachments 挂在 `MilestoneRecord` 上。老 milestone 被 `clampArray(milestones, keep)`（默认 5）挤出去时，它的 attachment 列表也一起被驱逐。很老的文件对 agent 不可达——这符合人类直觉："记得上个月那个 PDF 吗？" 不一定能回忆起来；"记得早上那个 PDF 吗？" 应该可以。
+
+  完全发生在人类之间的文件传输**永远不会触发任何下载**。在 agent 主动调用 `feishu_get_message_file` 之前，插件**零网络请求**。
+
+- **`feishu_get_message_file` 按需下载附件。** Agent 真的想看这个文件时，用标记里的 `message_id`、`file_key`，加一个绝对 `save_to` 路径，再加上（建议） `original_filename` 调这个 tool。插件通过飞书 `im.messageResource.get` 拉下字节、写到磁盘——就这些。**没有 PDF 解析、没有 OCR、没有文本解码、没有按 MIME 分支处理。** 调用返回路径之后，agent 自己用 Read / read_file（Claude Code、codex）、OpenClaw 自带的 `image` 视觉 tool、或者 `exec` 直接 unzip docx/pptx 里的 XML——总之用任意手头工具读内容。
 
 为什么是"落盘交路径"而不是"插件解析好喂回去"？两个原因：
 

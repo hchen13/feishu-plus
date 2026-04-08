@@ -39,7 +39,12 @@ import { parsePostContent } from "./post.js";
 import { createFeishuReplyDispatcher } from "./reply-dispatcher.js";
 import { getFeishuRuntime } from "./runtime.js";
 import { getMessageFeishu, sendMessageFeishu } from "./send.js";
-import type { FeishuMessageContext, FeishuMediaInfo, ResolvedFeishuAccount } from "./types.js";
+import type {
+  FeishuMessageAttachment,
+  FeishuMessageContext,
+  FeishuMediaInfo,
+  ResolvedFeishuAccount,
+} from "./types.js";
 import type { DynamicAgentCreationConfig } from "./types.js";
 import { rolloverStatelessGroupSession } from "./stateless-session.js";
 
@@ -563,37 +568,85 @@ export function toMessageResourceType(messageType: string): "image" | "file" {
 }
 
 /**
- * Build a structured history-body entry for a group message when the bot was
- * not mentioned. For media messages (file/image/audio/video), emits a marker
- * the agent can later use to fetch the actual content via feishu_get_message_file.
+ * Render the body of a Feishu group message for history/milestone storage.
  *
- * Plain text / post / share_chat fall back to the raw parsed content, so we
- * don't change behavior for non-media chatter.
+ * For messages that carry attachments (top-level media or post-embedded media),
+ * each attachment is appended as a `[feishu_attachment ...]` marker so a later
+ * agent turn can call `feishu_get_message_file` against it. The plain text body
+ * (e.g. the post's textContent) is preserved as-is alongside the markers.
+ *
+ * Returned string does NOT include the speaker prefix; callers add their own
+ * `${sender}: ${body}` framing.
  */
-function formatGroupHistoryBody(ctx: {
-  contentType: string;
-  content: string;
-  messageId: string;
-  senderName?: string;
-  senderOpenId: string;
-}): string {
-  const speaker = ctx.senderName ?? ctx.senderOpenId;
-  const msgType = ctx.contentType;
-  if (
-    msgType === "file" ||
-    msgType === "image" ||
-    msgType === "audio" ||
-    msgType === "video" ||
-    msgType === "media"
-  ) {
-    const { imageKey, fileKey, fileName } = parseMediaKeys(ctx.content, msgType);
-    const key = imageKey ?? fileKey ?? "";
-    const attrs: string[] = [`type=${msgType}`, `message_id=${ctx.messageId}`];
-    if (key) attrs.push(`key=${key}`);
-    if (fileName) attrs.push(`name=${JSON.stringify(fileName)}`);
-    return `${speaker}: [feishu_attachment ${attrs.join(" ")}]`;
+function formatGroupBody(ctx: FeishuMessageContext): string {
+  const attachments = ctx.attachments ?? [];
+  if (attachments.length === 0) {
+    return ctx.content;
   }
-  return `${speaker}: ${ctx.content}`;
+  const markers = attachments.map((att) => {
+    const attrs: string[] = [`type=${att.type}`, `message_id=${ctx.messageId}`];
+    if (att.key) attrs.push(`key=${att.key}`);
+    if (att.name) attrs.push(`name=${JSON.stringify(att.name)}`);
+    return `[feishu_attachment ${attrs.join(" ")}]`;
+  });
+  // Posts (and any other type with both text content and embedded attachments)
+  // emit text-then-markers so the agent sees the surrounding context first.
+  const text = ctx.content?.trim() ?? "";
+  return text ? `${text}\n${markers.join("\n")}` : markers.join("\n");
+}
+
+/**
+ * Extract structured attachments from a Feishu message at ingest time.
+ *
+ * For top-level media messages (file/image/audio/video/media) the JSON
+ * payload is parsed via parseMediaKeys. For posts, parsePostContent is used
+ * to harvest both image keys and embedded file keys.
+ *
+ * Returns undefined when there are no attachments — callers store undefined
+ * (rather than an empty array) so memory usage stays predictable.
+ */
+function extractMessageAttachments(
+  rawContent: string,
+  messageType: string,
+): FeishuMessageAttachment[] | undefined {
+  if (
+    messageType === "file" ||
+    messageType === "image" ||
+    messageType === "audio" ||
+    messageType === "video" ||
+    messageType === "media"
+  ) {
+    const { imageKey, fileKey, fileName } = parseMediaKeys(rawContent, messageType);
+    const out: FeishuMessageAttachment[] = [];
+    if (messageType === "image" && imageKey) {
+      out.push({ type: "image", key: imageKey, name: fileName });
+    } else if (messageType === "file" && fileKey) {
+      out.push({ type: "file", key: fileKey, name: fileName });
+    } else if (messageType === "audio" && fileKey) {
+      out.push({ type: "audio", key: fileKey, name: fileName });
+    } else if ((messageType === "video" || messageType === "media") && fileKey) {
+      out.push({ type: "video", key: fileKey, name: fileName });
+      // The thumbnail image_key on a video message is rarely useful to the agent
+      // and the messageResource API only accepts the primary file_key, so we drop it.
+    }
+    return out.length > 0 ? out : undefined;
+  }
+  if (messageType === "post") {
+    try {
+      const { imageKeys, mediaKeys } = parsePostContent(rawContent);
+      const out: FeishuMessageAttachment[] = [];
+      for (const k of imageKeys) {
+        if (k) out.push({ type: "image", key: k });
+      }
+      for (const m of mediaKeys) {
+        if (m.fileKey) out.push({ type: "file", key: m.fileKey, name: m.fileName });
+      }
+      return out.length > 0 ? out : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -832,6 +885,11 @@ export function parseFeishuMessageEvent(
   const senderUserId = event.sender.sender_id.user_id?.trim();
   const senderFallbackId = senderOpenId || senderUserId || "";
 
+  const attachments = extractMessageAttachments(
+    event.message.content,
+    event.message.message_type,
+  );
+
   const ctx: FeishuMessageContext = {
     chatId: event.message.chat_id,
     messageId: event.message.message_id,
@@ -847,6 +905,7 @@ export function parseFeishuMessageEvent(
     threadId: event.message.thread_id || undefined,
     content,
     contentType: event.message.message_type,
+    attachments,
   };
 
   // Detect mention forward request: message mentions bot + at least one other user
@@ -1154,7 +1213,7 @@ export async function handleFeishuMessage(params: {
         chatId: ctx.chatId,
         messageId: ctx.messageId,
         sender: ctx.senderName ?? ctx.senderOpenId,
-        body: ctx.content,
+        body: formatGroupBody(ctx),
         config: feishuCfg.milestoneContext,
       });
 
@@ -1188,7 +1247,7 @@ export async function handleFeishuMessage(params: {
           limit: historyLimit,
           entry: {
             sender: ctx.senderOpenId,
-            body: formatGroupHistoryBody(ctx),
+            body: `${ctx.senderName ?? ctx.senderOpenId}: ${formatGroupBody(ctx)}`,
             timestamp: Date.now(),
             messageId: ctx.messageId,
           },

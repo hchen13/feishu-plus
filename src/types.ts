@@ -37,6 +37,20 @@ export type ResolvedFeishuAccount = {
 
 export type FeishuIdType = "open_id" | "user_id" | "union_id" | "chat_id";
 
+/**
+ * Structured marker for an attachment carried by a Feishu message.
+ * Populated for top-level media messages (file/image/audio/video) and for
+ * media keys embedded inside a rich-text post.
+ *
+ * The agent uses (messageId, key) as the input to feishu_get_message_file
+ * when it decides to read the attachment.
+ */
+export type FeishuMessageAttachment = {
+  type: "file" | "image" | "audio" | "video";
+  key: string;
+  name?: string;
+};
+
 export type FeishuMessageContext = {
   chatId: string;
   messageId: string;
@@ -53,6 +67,8 @@ export type FeishuMessageContext = {
   contentType: string;
   /** Mention forward targets (excluding the bot itself) */
   mentionTargets?: MentionTarget[];
+  /** Structured attachments parsed from the message at ingest time. */
+  attachments?: FeishuMessageAttachment[];
 };
 
 export type FeishuSendResult = {

@@ -514,7 +514,7 @@ Local additions or expansions in this fork:
 - `feishu_id_admin`
   - rebuild_index (scan session history for observed IDs), search_observed (zero-API local search), verify_matrix (cross-account visibility report), explain_visibility (single-target deep diagnosis)
 - `feishu_get_message_file`
-  - downloads any image / file / audio / video attachment by `message_id` + `file_key`. PDFs are extracted to text via the bundled `pdfjs-dist`, images are returned as native image content blocks, plain text is inlined, office binaries return an explicit "convert to PDF" hint. See [Reading files sent without @mention](#reading-files-sent-without-mention) for the cross-message workflow this enables.
+  - downloads any image / file / audio / video attachment by `message_id` + `file_key` and writes the raw bytes to an agent-chosen path on disk. The plugin does **not** parse, extract, or interpret the file — that is the agent's job using its own file-reading tools (Read, read_file, etc.). See [Reading files sent without @mention](#reading-files-sent-without-mention) for the cross-message workflow this enables.
 
 Optional sensitive tooling:
 
@@ -536,22 +536,23 @@ Feishu's mobile UI does not let you attach a file **and** `@mention` the bot in 
 1. Drop a PDF (or image, doc, etc.) into the group with no `@bot`.
 2. Follow up with a second message: `@bot 帮我看看这个 PDF`.
 
-`feishu-plus` makes this work end-to-end through two coordinated changes:
+`feishu-plus` makes this work end-to-end through two coordinated changes, both of which are deliberately format-agnostic:
 
-- **GroupSense pending history records a structured attachment marker.** Group messages that do not mention the bot are normally buffered into GroupSense as raw text. For file / image / audio / video messages, the body is now serialized as `[feishu_attachment type=file message_id=… key=… name="…"]` instead of the raw `{"file_key":"..."}` JSON, so later turns can clearly see that a real attachment existed and reference it.
-- **`feishu_get_message_file` downloads the captured attachment on demand.** When the agent decides to actually open the file, it calls this tool with the `message_id` and `file_key` it sees in the marker. No re-uploading or user prompting needed.
+- **GroupSense pending history (and milestone summaries) record structured attachment markers.** Group messages that do not mention the bot are normally buffered into GroupSense as raw text. For messages that carry attachments — top-level `file` / `image` / `audio` / `video` messages **and** rich-text `post` messages with embedded image or file keys — each attachment is serialized as `[feishu_attachment type=… message_id=… key=… name="…"]` instead of the raw `{"file_key":"..."}` JSON. The same formatting feeds the milestone-context summarizer, so the LLM that builds milestones sees real attachment references instead of opaque JSON. When the user later `@`s the bot, the agent has a referenceable handle in its context — and the plugin has done **zero** network calls up to this point. Files exchanged purely between humans never trigger downloads.
+- **`feishu_get_message_file` downloads the attachment on demand.** When the agent decides it actually wants to read the file, it calls this tool with the `message_id`, `file_key`, an absolute `save_to` path, and (ideally) the `original_filename` from the marker. The plugin downloads the bytes via Feishu's `im.messageResource.get` API and writes them to disk — that's it. **No PDF extraction, no OCR, no text decoding, no MIME-specific branching.** After the tool returns the path, the agent uses its own file-reading tool (Claude Code's `Read`, codex's `read_file`, etc.) to inspect the contents.
 
-Behavior by content type:
+Why save-to-disk instead of inline parsing? Two reasons:
 
-| Type | Handling |
-| --- | --- |
-| **PDF** | Extracted to text via the bundled `pdfjs-dist` (capped at 50 pages / 200K chars) and wrapped in an external-untrusted-content block |
-| **Image** (`png`, `jpg`, `gif`, `webp`, `heic`) | Returned as a native image content block. Any vision-capable model on the agent (Claude, gpt-5.x, GLM-5, …) can read it directly |
-| **Plain text** (`.txt`, `.md`, `.csv`, `.json`, `.log`, `.xml`, source files, …) | Decoded as UTF-8 with Latin-1 fallback, then inlined |
-| **Office binary** (`.docx`, `.xlsx`, `.pptx`, `.doc`, `.xls`, `.ppt`) | Returns an explicit "this format is not supported — please save as PDF and re-upload" message instead of pretending to read the bytes |
-| **Anything else** | Fallback message with the detected MIME type |
+1. **Universal by construction.** Whatever format the agent's own file tools can read (PDF, image, plain text, Jupyter notebook, …), this tool can deliver. New formats just work the moment the agent's tools learn them — no plugin update needed.
+2. **Persistent and re-usable.** Once a file is on disk, the agent can grep it, transform it, reference it later, or attach it to a downstream tool call. An inline-parsed text blob would be one-shot.
 
-Files larger than 30 MB are rejected outright so the agent's context window stays predictable. The tool uses `pdfjs-dist` that is already a transitive dependency — no new dependency is declared.
+Behavior:
+
+- `save_to` must be an absolute path. The tool decides directory-vs-file mode automatically: a trailing separator, an existing directory, or a basename with no `.` in it all mean "directory" (and `original_filename` is appended inside). Otherwise `save_to` is used as the full file path. The chosen mode is reported in the tool result text so misclassification is debuggable. Parent directories are created automatically.
+- The tool routes through the same `withFeishuToolClient` wrapper as every other `feishu_*` tool, so disabled accounts, missing credentials, and `asAccountId` supervisor delegation behave identically.
+- Hard cap: 100 MB per file. Larger downloads are rejected.
+- For multi-account-bound agents, pass `asAccountId` to disambiguate which Feishu app to download through.
+- Caveat for posts: the `[feishu_attachment ...]` marker is emitted for keys embedded in rich-text post messages too, but `im.messageResource.get` may or may not accept those embedded keys depending on Feishu's API behavior — the agent will see the underlying error verbatim if a download fails.
 
 ## Notes For AI Agents
 

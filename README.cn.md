@@ -511,7 +511,7 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
 - `feishu_task_*`
   - create、get、update、delete
 - `feishu_get_message_file`
-  - 通过 `message_id` + `file_key` 下载任意 image / file / audio / video 附件。PDF 通过自带的 `pdfjs-dist` 抽取文本，图片以原生 image content block 返回，纯文本就地解码内联，office 二进制格式返回明确的"请另存为 PDF"提示。配套的端到端工作流见 [群里发文件不 @bot 也能让 agent 读取](#群里发文件不-bot-也能让-agent-读取)。
+  - 通过 `message_id` + `file_key` 下载任意 image / file / audio / video 附件，把原始字节写到 agent 指定的本地路径。插件**不**做任何解析、抽取或解读——格式相关的事情全部交给 agent 自己的文件工具（Read、read_file 等）。配套的端到端工作流见 [群里发文件不 @bot 也能让 agent 读取](#群里发文件不-bot-也能让-agent-读取)。
 
 敏感能力：
 
@@ -533,22 +533,23 @@ ID 标准化方式与 `allowFrom` 一致，`feishu:` 前缀会自动剥除。如
 1. 用户先把 PDF（或图片、文档等）扔进群里，不 `@bot`
 2. 再发一条 `@bot 帮我看看这个 PDF`
 
-`feishu-plus` 通过两个配套改动让这个流程端到端打通：
+`feishu-plus` 通过两个配套改动让这个流程端到端打通，而且这两个改动都刻意做成与文件格式无关：
 
-- **GroupSense 的 pending history 记录结构化的附件标记。** 群里没 mention bot 的消息原本只是被缓存为原始文本进 GroupSense。对于 file / image / audio / video 类型的消息，body 现在会被序列化成 `[feishu_attachment type=file message_id=… key=… name="…"]`，而不是 `{"file_key":"..."}` 的裸 JSON——这样后续轮次能清楚看到群里出现过一个真实的附件，并能引用到它。
-- **`feishu_get_message_file` 按需下载这个被记录的附件。** Agent 真正决定打开文件时，用标记里看到的 `message_id` 和 `file_key` 调这个 tool。整个过程不需要让用户重新上传，也不需要再追问。
+- **GroupSense pending history（以及 milestone summary）记录结构化的附件标记。** 群里没 mention bot 的消息原本只是被缓存为原始文本进 GroupSense。对于带附件的消息——顶层的 `file` / `image` / `audio` / `video` 消息**以及**带嵌入式 image_key / file_key 的富文本 `post` 消息——每一个附件都会被序列化成 `[feishu_attachment type=… message_id=… key=… name="…"]`，而不是 `{"file_key":"..."}` 的裸 JSON。同一份格式化结果同时喂给 milestone-context 摘要器，所以 LLM 在生成 milestone 时也能看到真实的附件引用，而不是看不懂的 JSON。当用户后面再 `@` bot 时，agent 在上下文里就有了一个可引用的"句柄"——并且**插件到此为止没有发起任何网络请求**。完全发生在人类之间的文件传输永远不会触发下载。
+- **`feishu_get_message_file` 按需下载附件。** Agent 真的想看这个文件时，用标记里的 `message_id`、`file_key`，加一个绝对 `save_to` 路径，再加上（建议） `original_filename` 调这个 tool。插件通过飞书 `im.messageResource.get` 拉下字节、写到磁盘——就这些。**没有 PDF 解析、没有 OCR、没有文本解码、没有按 MIME 分支处理。** 调用返回路径之后，agent 自己用 Read / read_file（Claude Code、codex 等都自带）去读内容。
 
-按内容类型的处理行为：
+为什么是"落盘交路径"而不是"插件解析好喂回去"？两个原因：
 
-| 类型 | 处理方式 |
-| --- | --- |
-| **PDF** | 通过自带的 `pdfjs-dist` 抽取文本（最多 50 页 / 200K 字符），再包进 external-untrusted-content block |
-| **图片**（`png`、`jpg`、`gif`、`webp`、`heic`） | 以原生 image content block 返回。Agent 上任何带视觉能力的模型（Claude、gpt-5.x、GLM-5……）都能直接看 |
-| **纯文本**（`.txt`、`.md`、`.csv`、`.json`、`.log`、`.xml`、各类源代码……） | 按 UTF-8 解码（失败回退 Latin-1），就地内联 |
-| **Office 二进制**（`.docx`、`.xlsx`、`.pptx`、`.doc`、`.xls`、`.ppt`） | 返回明确的"暂不支持，请另存为 PDF 后重新上传"提示，不会装作能读 |
-| **其他格式** | 返回带检测到的 MIME 类型的兜底提示 |
+1. **天然 universal。** Agent 的文件工具能读什么格式（PDF、图片、纯文本、Jupyter notebook……），这个 tool 就能交付什么格式。将来出新格式，只要 agent 自己的工具学会读就直接生效，不用动插件。
+2. **持久化、可复用。** 文件落到磁盘后，agent 还可以 grep、转换、稍后再引用、传给下游 tool 调用。一次性 inline 解析的文本块只能用一次。
 
-超过 30 MB 的文件会直接拒绝，避免 agent 的上下文窗口被一份大文件吃光。这个 tool 用的 `pdfjs-dist` 本来就是 feishu-plus 的传递依赖——没有新增任何 declared dependency。
+行为说明：
+
+- `save_to` 必须是绝对路径。directory-vs-file 模式由 tool 自动判断：以分隔符结尾、或者已经是个目录、或者 basename 完全不带 `.`，都会被当作目录（这时把 `original_filename` 追加进去）。否则就把 `save_to` 当成完整的文件路径用。判断结果会写到 tool 的返回文本里，方便排查误判。父目录会自动创建。
+- 这个 tool 走的是和其它 `feishu_*` tool 完全相同的 `withFeishuToolClient` 包装层，所以禁用账号、缺少凭据、`asAccountId` supervisor 委托等行为都和其它工具一致。
+- 单文件硬上限 100 MB，超过直接拒绝。
+- 多账号绑定的 agent 调用时可以传 `asAccountId` 指定走哪个飞书应用下载。
+- Post 消息的注意事项：`[feishu_attachment ...]` 标记对富文本 post 中嵌入的 key 也会发出，但 `im.messageResource.get` 是否真的接受这种 embedded key 取决于飞书 API 的实现——下载失败时 agent 会原样看到底层错误信息。
 
 ## 给 AI Agents 的部署说明
 

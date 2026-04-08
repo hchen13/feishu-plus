@@ -586,7 +586,13 @@ function formatGroupBody(ctx: FeishuMessageContext): string {
   const markers = attachments.map((att) => {
     const attrs: string[] = [`type=${att.type}`, `message_id=${ctx.messageId}`];
     if (att.key) attrs.push(`key=${att.key}`);
-    if (att.name) attrs.push(`name=${JSON.stringify(att.name)}`);
+    if (att.name) {
+      // Strip brackets from the filename so a pathological name can't terminate
+      // the marker early when downstream consumers (e.g. milestone attachment
+      // extractor) match `\[feishu_attachment ... \]`.
+      const safeName = att.name.replace(/[\[\]]/g, "");
+      attrs.push(`name=${JSON.stringify(safeName)}`);
+    }
     return `[feishu_attachment ${attrs.join(" ")}]`;
   });
   // Posts (and any other type with both text content and embedded attachments)

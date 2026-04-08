@@ -61,6 +61,17 @@ export type MilestoneSummary = {
 
 export type MilestoneRecord = {
   summary?: MilestoneSummary;
+  /**
+   * Verbatim attachment markers extracted from the source entries before
+   * LLM summarization. Stored alongside (not inside) `summary` so the LLM's
+   * compression behavior can never lose them. Each entry is the full
+   * `[feishu_attachment type=… message_id=… key=… name="…"]` string.
+   *
+   * Lifetime: tied to the milestone itself — when a milestone is evicted by
+   * `clampArray(milestones, keep)` its attachments evict with it. This is the
+   * intended retention model: very old attachments aren't reachable anymore.
+   */
+  attachments?: string[];
   fromMessageId: string;
   toMessageId: string;
   fromIndex: number;
@@ -164,6 +175,35 @@ function pickUnique(list: string[], max = 3): string[] {
     if (result.length >= max) break;
   }
   return result;
+}
+
+/**
+ * Regex-extract all `[feishu_attachment ...]` markers from a window of
+ * history entries, deduped, in first-seen order. Used to capture attachment
+ * references deterministically before the LLM summarizer gets a chance to
+ * compress them away.
+ *
+ * The marker format is defined in bot.ts → formatGroupBody. Filenames are
+ * sanitized at emission time to never contain `[` or `]`, so this regex is
+ * safe to terminate at the first `]`.
+ */
+const FEISHU_ATTACHMENT_MARKER_REGEX = /\[feishu_attachment [^\]]+\]/g;
+
+function extractAttachmentMarkers(entries: HistoryEntry[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of entries) {
+    const body = entry.body ?? "";
+    const matches = body.match(FEISHU_ATTACHMENT_MARKER_REGEX);
+    if (!matches) continue;
+    for (const marker of matches) {
+      if (!seen.has(marker)) {
+        seen.add(marker);
+        out.push(marker);
+      }
+    }
+  }
+  return out;
 }
 
 function extractMilestoneFields(entries: HistoryEntry[]): MilestoneSummary {
@@ -468,9 +508,14 @@ export async function evaluateMilestoneForChat(params: {
     const summarizedFromIndex = Math.max(0, store.lastIndex - summarizedCount + 1);
     const summarizedToIndex = store.lastIndex;
 
+    // Extract attachment markers BEFORE the LLM call so the deterministic copy
+    // is captured even if the LLM later compresses or drops the marker text.
+    const attachments = extractAttachmentMarkers(store.recentEntries);
+
     const summary = await extractSummaryWithLLM(store.recentEntries, params.config);
     const record: MilestoneRecord = {
       summary,
+      attachments: attachments.length > 0 ? attachments : undefined,
       fromMessageId: from,
       toMessageId: to,
       fromIndex: summarizedFromIndex,
@@ -532,6 +577,15 @@ export async function buildMilestonePrefix(
         bodyLines.push(
           `${idx + 1}. 里程碑 [${item.fromIndex}..${item.toIndex}, ${item.messageCount}条]`,
         );
+      }
+      // Render attachments outside the LLM-summary block so they survive any
+      // compression behavior. Each marker carries the message_id + file_key the
+      // agent needs to call feishu_get_message_file.
+      if (item.attachments && item.attachments.length > 0) {
+        bodyLines.push(`  - 附件（原文标记，可直接用于 feishu_get_message_file）:`);
+        for (const marker of item.attachments) {
+          bodyLines.push(`    - ${marker}`);
+        }
       }
     });
     bodyLines.push("");

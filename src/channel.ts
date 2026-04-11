@@ -194,6 +194,14 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount> = {
             window: { type: "integer", minimum: 1 },
             maxChars: { type: "integer", minimum: 1 },
             keep: { type: "integer", minimum: 1 },
+            llmInputTrace: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                enabled: { type: "boolean" },
+                outputDir: { type: "string" },
+              },
+            },
           },
         },
         accounts: {

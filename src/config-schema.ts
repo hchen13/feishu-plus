@@ -83,6 +83,13 @@ const MilestoneContextSchema = z
     maxChars: z.number().int().positive().optional(),
     keep: z.number().int().positive().optional(),
     model: z.string().optional(),
+    llmInputTrace: z
+      .object({
+        enabled: z.boolean().optional(),
+        outputDir: z.string().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .optional();

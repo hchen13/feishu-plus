@@ -94,7 +94,10 @@ openclaw plugins install github:hchen13/feishu-plus
       "renderMode": "auto",
       "textChunkLimit": 30000,
       "milestoneContext": {
-        "enabled": false
+        "enabled": false,
+        "llmInputTrace": {
+          "enabled": false
+        }
       },
       "accounts": {
         "assistant": {
@@ -256,7 +259,24 @@ Operationally, it does five things:
 2. Periodically summarizes a discussion window into milestones using an LLM call (via the plugin-sdk `agent-runtime` API).
 3. Stores those milestones under `~/.openclaw/shared-knowledge/feishu-group-milestones`.
 4. Injects milestone summaries plus recent raw group history back into later prompts.
-5. Rolls over the group session after each dispatch (stateless mode), so every turn starts with only the refined GroupSense context — no LLM history accumulation, no wasted tokens.
+5. By default, rolls over the group session after each dispatch (stateless mode), so every turn starts with only the refined GroupSense context — no LLM history accumulation, no wasted tokens.
+
+When `plugins.slots.contextEngine` is set to `"groupsense"`, the plugin skips that post-dispatch rollover and lets the context engine hide prior transcript turns from the model while keeping the physical session intact for Control UI.
+
+For prompt-payload debugging, you can temporarily enable:
+
+```json
+"milestoneContext": {
+  "enabled": true,
+  "llmInputTrace": {
+    "enabled": true
+  }
+}
+```
+
+That writes the real `llm_input` hook payload for Feishu group turns to `~/.openclaw/shared-knowledge/feishu-groupsense-context-engine/llm-input-traces`, including `systemPrompt`, `prompt`, and `historyMessages`.
+
+With trace dumping off, the gateway still emits lightweight `feishu[groupsense]` log lines for checkpoint capture, checkpoint hits, delegate fallback, and `llm_input` prompt markers so you can follow behavior without writing full payloads to disk.
 
 The resulting user experience is straightforward: one agent can respond with immediate context about what another agent recently argued, decided, or promised, so the group feels less like isolated bots and more like a coherent team conversation.
 

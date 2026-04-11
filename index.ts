@@ -15,6 +15,8 @@ import { registerFeishuIdTools } from "./src/id-index.js";
 import { registerFeishuIdAdminTools } from "./src/id-index-admin.js";
 import { registerFeishuGroupContextTool } from "./src/group-context.js";
 import { registerFeishuMessageFileTool } from "./src/message-resource-tool.js";
+import { registerGroupSenseContextEngine } from "./src/groupsense-context-engine.js";
+import { registerGroupSenseLlmInputTrace } from "./src/groupsense-llm-input-trace.js";
 
 export { monitorFeishuProvider } from "./src/monitor.js";
 export {
@@ -59,6 +61,8 @@ const plugin = {
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     setFeishuRuntime(api.runtime);
+    registerGroupSenseContextEngine(api);
+    registerGroupSenseLlmInputTrace(api);
     api.registerChannel({ plugin: feishuPlugin });
 
     // Apply per-turn model downgrade for quota-restricted users.

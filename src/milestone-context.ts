@@ -40,6 +40,10 @@ export type MilestoneContextConfig = {
    * Defaults to the OpenClaw global default model (agents.defaults.model.primary).
    */
   model?: string;
+  llmInputTrace?: {
+    enabled?: boolean;
+    outputDir?: string;
+  };
 };
 
 export type MilestoneDecision = {

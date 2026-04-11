@@ -47,6 +47,7 @@ import type {
 } from "./types.js";
 import type { DynamicAgentCreationConfig } from "./types.js";
 import { rolloverStatelessGroupSession } from "./stateless-session.js";
+import { shouldUseStatelessGroupRollover } from "./groupsense-context-engine.js";
 
 // --- Permission error extraction ---
 // Extract permission grant URL from Feishu API error response.
@@ -1802,7 +1803,7 @@ export async function handleFeishuMessage(params: {
       }
 
       // GroupSense is active: rollover session so next turn starts fresh (no LLM history accumulation)
-      if (isGroup && feishuCfg?.milestoneContext?.enabled !== false) {
+      if (isGroup && shouldUseStatelessGroupRollover(cfg)) {
         await rolloverStatelessGroupSession({ agentId: route.agentId, sessionKey: route.sessionKey, log });
       }
 
@@ -1877,7 +1878,7 @@ export async function handleFeishuMessage(params: {
       }
 
       // GroupSense is active: rollover session so next turn starts fresh (no LLM history accumulation)
-      if (isGroup && feishuCfg?.milestoneContext?.enabled !== false) {
+      if (isGroup && shouldUseStatelessGroupRollover(cfg)) {
         await rolloverStatelessGroupSession({ agentId: route.agentId, sessionKey: route.sessionKey, log });
       }
 
